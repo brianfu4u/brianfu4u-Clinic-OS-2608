@@ -41,3 +41,5 @@ Authoritative Workflow attach persistence now covers exact match, deterministic 
 and append-only Link writes only; Expectation and later closure persistence remain separate.
 Exact candidate rows and their source Artifact are locked during attach. Real PostgreSQL
 close/attach and multi-worker interleavings remain deployment acceptance cases.
+Expectation initialization now persists the current projection with one append-only,
+tenant-scoped initialization transition. Later evidence re-evaluation remains out of scope.

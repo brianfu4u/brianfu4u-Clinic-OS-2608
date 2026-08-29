@@ -14,6 +14,9 @@ const migrations = await loadRepositoryMigrations();
 const migrationSql = await readFile(
   new URL("../src/persistence/migrations/0001_trusted_core.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0002_expectation_transition.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -75,6 +78,7 @@ test("fresh migration creates the required tables", async () => {
         "artifact",
         "evidence_fact_card",
         "expectation",
+        "expectation_transition",
         "manager_decision",
         "schema_migration",
         "workflow",
@@ -89,10 +93,13 @@ test("fresh migration creates the required tables", async () => {
 test("identical migration rerun is a no-op", async () => {
   const db = new PGlite();
   try {
-    assert.deepEqual(await applyMigrations(db, migrations), ["0001_trusted_core"]);
+    assert.deepEqual(
+      await applyMigrations(db, migrations),
+      ["0001_trusted_core", "0002_expectation_transition"],
+    );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 1);
+    assert.equal(ledger.rows.length, 2);
   } finally {
     await db.close();
   }
@@ -381,6 +388,7 @@ test("every business table enables and forces RLS with USING and WITH CHECK", as
       "workflow",
       "workflow_artifact_link",
       "expectation",
+      "expectation_transition",
       "manager_decision",
     ];
     const flags = await db.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
