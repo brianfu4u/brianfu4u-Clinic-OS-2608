@@ -229,6 +229,8 @@ test("invalid caller inputs fail before acquisition", async () => {
       "2026-08-29T24:05:00Z",
       "2026-08-29T09:05:00+15:00",
       "2026-08-29T09:05:00+14:01",
+      "0000-01-01T09:05:00Z",
+      "2026-08-29T09:05:00.1234Z",
     ]) {
       await assert.rejects(
         repository.attachCapture(actor(), "artifact-a", "fact-a", invalidTime),
@@ -261,11 +263,12 @@ test("explicit ISO timestamp with offset is accepted", async () => {
   await pool.migrate();
   try {
     await seedCapture(pool);
+    const attachedAt = "2026-08-29T18:05:00.12+09:00";
     const result = await new WorkflowAttachRepository(pool).attachCapture(
-      actor(), "artifact-a", "fact-a", "2026-08-29T18:05:00+09:00",
+      actor(), "artifact-a", "fact-a", attachedAt,
     );
     assert.equal(result.resolution.kind, "CREATE_NEW");
-    assert.equal(Date.parse(result.link.attachedAt), Date.parse(ATTACHED_AT));
+    assert.equal(Date.parse(result.link.attachedAt), Date.parse(attachedAt));
   } finally {
     await pool.close();
   }

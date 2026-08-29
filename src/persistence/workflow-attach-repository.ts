@@ -187,7 +187,7 @@ function validateInput(
 }
 
 function isExplicitIsoTimestamp(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
   if (!match) return false;
   const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone, , offsetHourText, offsetMinuteText] = match;
   const year = Number(yearText);
@@ -197,7 +197,7 @@ function isExplicitIsoTimestamp(value: string): boolean {
   const minute = Number(minuteText);
   const second = Number(secondText);
   if (
-    month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) ||
+    year < 1 || month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) ||
     hour > 23 || minute > 59 || second > 59
   ) return false;
   if (zone !== "Z") {
