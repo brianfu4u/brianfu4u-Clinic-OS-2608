@@ -1,6 +1,6 @@
 # WO-011 — Expectation Re-evaluation Ledger
 
-**Status:** READY FOR BUILD  
+**Status:** ACCEPTED  
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -144,3 +144,17 @@ npm run runtime:demo
 ## 11. Builder handoff
 
 The Builder must read the Constitution and WO-007 through WO-011, implement only this slice, run all acceptance commands, commit as `feat(persistence): add expectation reevaluation ledger`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 12. Architecture acceptance
+
+Accepted on 2026-08-29 through `225a5e7` after independent review.
+
+- 174/174 tests and both demos pass.
+- Explicit re-evaluation preserves `OPEN -> UNMET -> MET` history without rewriting the earlier `UNMET` fact.
+- Only exact-identity, linked and evaluation-time-visible evidence can satisfy the stored rule.
+- Evaluation time is monotonic; `MET` and `VOIDED` do not automatically regress.
+- Transition append and current-projection update commit or roll back as one tenant transaction.
+- Migration `0003` rejects illegal automatic paths and duplicate evaluation instants.
+- Constitution and migrations `0001`/`0002` remain unchanged; no dependency was added.
+
+Scheduling, persisted manager/VOID transitions, persisted S2 Verification, real PostgreSQL application-role RLS/concurrency, backup and restore remain later acceptance gates.
