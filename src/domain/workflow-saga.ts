@@ -113,7 +113,8 @@ export class WorkflowSaga {
     if (input.actorRole !== "MANAGER") {
       throw new DomainError("MANAGER_ROLE_REQUIRED", "Only a manager may decide a Workflow.");
     }
-    if (!input.id || !input.actorId || !Number.isFinite(Date.parse(input.decidedAt))) {
+    const decidedAt = Date.parse(input.decidedAt);
+    if (!input.id || !input.actorId || !Number.isFinite(decidedAt)) {
       throw new DomainError("INVALID_MANAGER_DECISION", "Decision ID, actor and timestamp are required.");
     }
     if (!["CLOSE_STANDARD", "CLOSE_EXCEPTION", "KEEP_OPEN", "VOID"].includes(input.action)) {
@@ -129,6 +130,48 @@ export class WorkflowSaga {
       !input.expectation.id
     ) {
       throw new DomainError("EXPECTATION_MISMATCH", "Expectation does not belong to this Workflow.");
+    }
+
+    const evaluatedAt = Date.parse(input.expectation.evaluatedAt);
+    if (!Number.isFinite(evaluatedAt) || evaluatedAt > decidedAt) {
+      throw new DomainError(
+        "INVALID_DECISION_SNAPSHOT_TIME",
+        "Expectation evaluation must be valid and no later than the decision.",
+      );
+    }
+    const visibleArtifactIds = this.listLinks(input.clinicId, input.workflowId)
+      .filter((link) => {
+        const attachedAt = Date.parse(link.attachedAt);
+        if (!Number.isFinite(attachedAt)) {
+          throw new DomainError(
+            "INVALID_DECISION_LINK_TIME",
+            "Workflow link attachedAt must be a valid timestamp.",
+          );
+        }
+        return attachedAt <= decidedAt;
+      })
+      .map(({ artifactId }) => artifactId);
+    if (
+      input.expectation.state === "MET" &&
+      (
+        input.expectation.satisfiedByArtifactId === null ||
+        input.expectation.satisfiedByArtifactId.trim() === "" ||
+        !visibleArtifactIds.includes(input.expectation.satisfiedByArtifactId)
+      )
+    ) {
+      throw new DomainError(
+        "INVALID_DECISION_EVIDENCE_SNAPSHOT",
+        "A MET Expectation must be satisfied by evidence visible at decision time.",
+      );
+    }
+    if (
+      input.expectation.state !== "MET" &&
+      input.expectation.satisfiedByArtifactId !== null
+    ) {
+      throw new DomainError(
+        "INVALID_DECISION_EVIDENCE_SNAPSHOT",
+        "Only a MET Expectation may identify satisfying evidence.",
+      );
     }
 
     const reasonCode = nullableText(input.reasonCode, 100, "INVALID_REASON_CODE");
@@ -149,8 +192,7 @@ export class WorkflowSaga {
       actorId: input.actorId,
       actorRole: "MANAGER",
       decidedAt: input.decidedAt,
-      evidenceArtifactIds: this.listLinks(input.clinicId, input.workflowId)
-        .map(({ artifactId }) => artifactId),
+      evidenceArtifactIds: visibleArtifactIds,
     };
 
     const existing = this.#decisions.get(input.id);

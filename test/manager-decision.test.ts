@@ -245,3 +245,82 @@ test("closed exception projection preserves UNMET history without review", () =>
   assert.equal(view.expectationState, "UNMET");
   assert.equal(view.needsReview, false);
 });
+
+test("forged MET snapshot cannot close without linked satisfying evidence", () => {
+  for (const satisfiedByArtifactId of [null, "artifact-not-linked"]) {
+    const store = saga();
+    const input = decisionInput("MET", "CLOSE_STANDARD", {
+      expectation: expectation("MET", { satisfiedByArtifactId }),
+    });
+    assert.throws(
+      () => store.recordManagerDecision(input),
+      (error) =>
+        error instanceof DomainError &&
+        error.code === "INVALID_DECISION_EVIDENCE_SNAPSHOT",
+    );
+    assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
+    assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
+  }
+});
+
+test("non-MET snapshot cannot claim satisfying evidence", () => {
+  const store = saga();
+  const input = decisionInput("UNMET", "CLOSE_EXCEPTION", {
+    reasonCode: "LEGITIMATE_DEVIATION",
+    expectation: expectation("UNMET", { satisfiedByArtifactId: "artifact-report" }),
+  });
+  assert.throws(
+    () => store.recordManagerDecision(input),
+    (error) =>
+      error instanceof DomainError &&
+      error.code === "INVALID_DECISION_EVIDENCE_SNAPSHOT",
+  );
+  assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
+  assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
+});
+
+test("future or invalid Expectation evaluation cannot authorize a decision", () => {
+  for (const evaluatedAt of ["2026-08-29T09:15:00.001Z", "not-a-time"]) {
+    const store = saga();
+    const input = decisionInput("MET", "CLOSE_STANDARD", {
+      expectation: expectation("MET", { evaluatedAt }),
+    });
+    assert.throws(
+      () => store.recordManagerDecision(input),
+      (error) =>
+        error instanceof DomainError &&
+        error.code === "INVALID_DECISION_SNAPSHOT_TIME",
+    );
+    assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
+    assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
+  }
+});
+
+test("decision lineage excludes links attached after decidedAt", () => {
+  const store = saga({
+    initialLinks: [
+      link("artifact-registration"),
+      link("artifact-report"),
+      { ...link("artifact-future"), attachedAt: "2026-08-29T09:15:00.001Z" },
+    ],
+  });
+  const result = store.recordManagerDecision(decisionInput());
+  assert.deepEqual(result.decision.evidenceArtifactIds, [
+    "artifact-registration",
+    "artifact-report",
+  ]);
+});
+
+test("invalid link time fails decision snapshot closed", () => {
+  const store = saga({
+    initialLinks: [link("artifact-registration"), { ...link("artifact-report"), attachedAt: "bad" }],
+  });
+  assert.throws(
+    () => store.recordManagerDecision(decisionInput()),
+    (error) =>
+      error instanceof DomainError &&
+      error.code === "INVALID_DECISION_LINK_TIME",
+  );
+  assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
+  assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
+});
