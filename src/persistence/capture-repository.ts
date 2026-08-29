@@ -1,6 +1,7 @@
 import type { ActorContext, Artifact, EvidenceFactCard } from "../domain/contracts.ts";
 import { assertActorContext } from "../domain/access-context.ts";
 import { DomainError } from "../domain/errors.ts";
+import { assertFactCardIdentitySource } from "../domain/identity-gate.ts";
 import type { DatabasePool, TenantQueryClient } from "./database-contracts.ts";
 import { withTenantTransaction } from "./tenant-transaction.ts";
 
@@ -58,37 +59,48 @@ export class CaptureRepository {
     artifact: Artifact,
     factCard: EvidenceFactCard,
   ): Promise<SavedCapture> {
-    validateCapture(context, artifact, factCard);
-    return withTenantTransaction(this.#pool, context.clinicId, async (client) => {
-      const existingArtifact = await findArtifact(client, context.clinicId, artifact.id);
-      if (existingArtifact && !semanticEqual(existingArtifact, artifact)) {
+    const captured = structuredClone({ context, artifact, factCard });
+    validateCapture(captured.context, captured.artifact, captured.factCard);
+    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) => {
+      await insertArtifact(client, captured.context.clinicId, captured.artifact);
+      const storedArtifact = await findArtifact(
+        client,
+        captured.context.clinicId,
+        captured.artifact.id,
+      );
+      if (!storedArtifact || !artifactEqual(storedArtifact, captured.artifact)) {
         throw new DomainError("ARTIFACT_ID_CONFLICT", "Artifact ID is already used by different content.");
       }
-      if (!existingArtifact) await insertArtifact(client, context.clinicId, artifact);
 
-      const existingFactCard = await findFactCard(client, context.clinicId, factCard.id);
-      if (existingFactCard && !semanticEqual(existingFactCard, factCard)) {
+      await insertFactCard(client, captured.context.clinicId, captured.factCard);
+      const storedFactCard = await findFactCard(
+        client,
+        captured.context.clinicId,
+        captured.factCard.id,
+      );
+      if (!storedFactCard || !factCardEqual(storedFactCard, captured.factCard)) {
         throw new DomainError("FACT_CARD_ID_CONFLICT", "FactCard ID is already used by different content.");
       }
-      if (!existingFactCard) await insertFactCard(client, context.clinicId, factCard);
 
       return {
-        artifact: structuredClone(existingArtifact ?? artifact),
-        factCard: structuredClone(existingFactCard ?? factCard),
+        artifact: structuredClone(captured.artifact),
+        factCard: structuredClone(captured.factCard),
       };
     });
   }
 
   async getArtifact(context: ActorContext, artifactId: string): Promise<Artifact | null> {
-    assertActorContext(context);
-    return withTenantTransaction(this.#pool, context.clinicId, async (client) =>
-      structuredClone(await findArtifact(client, context.clinicId, artifactId)));
+    const captured = structuredClone({ context, artifactId });
+    assertActorContext(captured.context);
+    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) =>
+      structuredClone(await findArtifact(client, captured.context.clinicId, captured.artifactId)));
   }
 
   async getFactCard(context: ActorContext, factCardId: string): Promise<EvidenceFactCard | null> {
-    assertActorContext(context);
-    return withTenantTransaction(this.#pool, context.clinicId, async (client) =>
-      structuredClone(await findFactCard(client, context.clinicId, factCardId)));
+    const captured = structuredClone({ context, factCardId });
+    assertActorContext(captured.context);
+    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) =>
+      structuredClone(await findFactCard(client, captured.context.clinicId, captured.factCardId)));
   }
 }
 
@@ -107,6 +119,7 @@ function validateCapture(
   if (!factCard.lineageArtifactIds.includes(artifact.id)) {
     throw new DomainError("FACT_CARD_LINEAGE_INVALID", "FactCard lineage must contain its supplied Artifact.");
   }
+  assertFactCardIdentitySource(factCard, artifact);
 }
 
 async function findArtifact(
@@ -139,7 +152,8 @@ async function insertArtifact(
   artifact: Artifact,
 ): Promise<void> {
   await client.query(
-    `INSERT INTO artifact (${ARTIFACT_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    `INSERT INTO artifact (${ARTIFACT_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (clinic_id, id) DO NOTHING`,
     [
       artifact.id,
       clinicId,
@@ -161,7 +175,8 @@ async function insertFactCard(
 ): Promise<void> {
   await client.query(
     `INSERT INTO evidence_fact_card (${FACT_CARD_COLUMNS})
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     ON CONFLICT (clinic_id, id) DO NOTHING`,
     [
       factCard.id,
       clinicId,
@@ -212,6 +227,26 @@ function factCardFromRow(row: FactCardRow): EvidenceFactCard {
 
 function timestamp(value: Date | string | null): string | null {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function artifactEqual(left: Artifact, right: Artifact): boolean {
+  return semanticEqual(
+    { ...left, occurredAt: instant(left.occurredAt), createdAt: instant(left.createdAt) },
+    { ...right, occurredAt: instant(right.occurredAt), createdAt: instant(right.createdAt) },
+  );
+}
+
+function factCardEqual(left: EvidenceFactCard, right: EvidenceFactCard): boolean {
+  return semanticEqual(
+    { ...left, occurredAt: instant(left.occurredAt) },
+    { ...right, occurredAt: instant(right.occurredAt) },
+  );
+}
+
+function instant(value: string | null): number | string | null {
+  if (value === null) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? value : parsed;
 }
 
 function semanticEqual(left: unknown, right: unknown): boolean {

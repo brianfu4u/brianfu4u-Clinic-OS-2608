@@ -32,3 +32,8 @@ enforcement, backup and restore remain required before production or clinic use.
 The tenant-scoped capture repository persists only Artifact + EvidenceFactCard through
 the same SQL-semantic harness. The preview still uses synthetic in-memory state; preview
 persistence parity and durable Workflow/Expectation/Decision operations are not complete.
+PostgreSQL `timestamptz` stores instants rather than the input timestamp spelling. Capture
+replay therefore compares only the declared Artifact/FactCard timestamp fields by instant;
+identity anchors, payload fields and all other strings remain exact.
+Atomic `ON CONFLICT` capture writes remove the application SELECT-to-INSERT race. Real
+PostgreSQL concurrent replay remains part of the existing real-server acceptance gate.

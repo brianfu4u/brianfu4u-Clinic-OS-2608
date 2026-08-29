@@ -11,17 +11,28 @@ export async function withTenantTransaction<T>(
 
   const connection = await pool.connect();
   let began = false;
+  let active = false;
   try {
     await connection.query("BEGIN");
     began = true;
     await connection.query("SELECT set_config('app.clinic_id', $1, true)", [clinicId]);
+    active = true;
     const client: TenantQueryClient = {
-      query: (text, values) => connection.query(text, values),
+      query: async (text, values) => {
+        if (!active) throw new Error("TENANT_TRANSACTION_CLOSED");
+        return connection.query(text, values);
+      },
     };
-    const result = await operation(client);
+    let result: T;
+    try {
+      result = await operation(client);
+    } finally {
+      active = false;
+    }
     await connection.query("COMMIT");
     return result;
   } catch (error) {
+    active = false;
     if (began) await connection.query("ROLLBACK");
     throw error;
   } finally {

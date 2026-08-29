@@ -10,6 +10,7 @@ import type {
   DatabaseConnection,
   DatabasePool,
   DatabaseQueryResult,
+  TenantQueryClient,
 } from "../src/persistence/database-contracts.ts";
 import {
   applyMigrations,
@@ -151,6 +152,35 @@ test("tenant transaction failure rolls back and releases exactly once", async ()
   }
 });
 
+test("retained tenant client fails closed after commit or rollback", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  let committedClient: TenantQueryClient | undefined;
+  let rolledBackClient: TenantQueryClient | undefined;
+  try {
+    await withTenantTransaction(pool, "clinic-a", async (client) => {
+      committedClient = client;
+    });
+    await assert.rejects(
+      committedClient?.query("SELECT 1"),
+      /TENANT_TRANSACTION_CLOSED/,
+    );
+    await assert.rejects(
+      withTenantTransaction(pool, "clinic-a", async (client) => {
+        rolledBackClient = client;
+        throw new Error("expected failure");
+      }),
+      /expected failure/,
+    );
+    await assert.rejects(
+      rolledBackClient?.query("SELECT 1"),
+      /TENANT_TRANSACTION_CLOSED/,
+    );
+  } finally {
+    await pool.close();
+  }
+});
+
 test("blank clinic fails before connection acquisition", async () => {
   const pool = new PGlitePoolShim();
   try {
@@ -184,12 +214,62 @@ test("malformed lineage or mismatched clinic persists neither row", async () => 
       repository.saveCapture(employee(), wrongArtifact.artifact, wrongArtifact.factCard),
       (error: unknown) => error instanceof DomainError && error.code === "FACT_CARD_ARTIFACT_MISMATCH",
     );
+    const rewrittenIdentity = capture();
+    rewrittenIdentity.factCard.identityAnchor = "PAT-REWRITTEN";
+    await assert.rejects(
+      repository.saveCapture(employee(), rewrittenIdentity.artifact, rewrittenIdentity.factCard),
+      (error: unknown) => error instanceof DomainError && error.code === "IDENTITY_ANCHOR_MISMATCH",
+    );
     assert.equal(pool.acquisitions, 0);
     const counts = await pool.db.query<{ artifacts: number; facts: number }>(
       `SELECT (SELECT count(*)::int FROM artifact) AS artifacts,
               (SELECT count(*)::int FROM evidence_fact_card) AS facts`,
     );
     assert.deepEqual(counts.rows[0], { artifacts: 0, facts: 0 });
+  } finally {
+    await pool.close();
+  }
+});
+
+test("saveCapture snapshots cloneable inputs before connection acquisition", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new CaptureRepository(pool);
+  const input = capture();
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => resume = resolve);
+  const originalConnect = pool.connect.bind(pool);
+  pool.connect = async () => {
+    await gate;
+    return originalConnect();
+  };
+  try {
+    const pending = repository.saveCapture(employee(), input.artifact, input.factCard);
+    input.artifact.identityAnchor = "PAT-MUTATED";
+    (input.artifact.payload as Record<string, unknown>).source = "mutated";
+    input.factCard.identityAnchor = "PAT-MUTATED";
+    input.factCard.fields.registration = false;
+    resume();
+    const saved = await pending;
+    assert.equal(saved.artifact.identityAnchor, " PAT-001 ");
+    assert.equal((saved.artifact.payload as Record<string, unknown>).source, "scan");
+    assert.equal(saved.factCard.identityAnchor, " PAT-001 ");
+    assert.equal(saved.factCard.fields.registration, true);
+    assert.deepEqual(await repository.getArtifact(employee(), "artifact-a"), saved.artifact);
+    assert.deepEqual(await repository.getFactCard(employee(), "fact-a"), saved.factCard);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("uncloneable capture fails before connection acquisition", async () => {
+  const pool = new PGlitePoolShim();
+  const repository = new CaptureRepository(pool);
+  try {
+    const input = capture();
+    input.artifact.payload = { invalid: () => undefined };
+    await assert.rejects(repository.saveCapture(employee(), input.artifact, input.factCard));
+    assert.equal(pool.acquisitions, 0);
   } finally {
     await pool.close();
   }
@@ -230,6 +310,40 @@ test("reordered JSON object keys replay idempotently", async () => {
   }
 });
 
+test("equivalent timestamp offset spellings replay idempotently without rewriting inputs", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new CaptureRepository(pool);
+  try {
+    const original = capture();
+    original.artifact.occurredAt = "2026-08-29T18:00:00+09:00";
+    original.artifact.createdAt = "2026-08-29T18:00:01+09:00";
+    original.factCard.occurredAt = "2026-08-29T18:00:00+09:00";
+    await repository.saveCapture(employee(), original.artifact, original.factCard);
+    const replay = capture();
+    await repository.saveCapture(employee(), replay.artifact, replay.factCard);
+    assert.equal(original.artifact.occurredAt, "2026-08-29T18:00:00+09:00");
+    assert.equal(original.factCard.occurredAt, "2026-08-29T18:00:00+09:00");
+    const counts = await pool.db.query<{ artifacts: number; facts: number }>(
+      `SELECT (SELECT count(*)::int FROM artifact) AS artifacts,
+              (SELECT count(*)::int FROM evidence_fact_card) AS facts`,
+    );
+    assert.deepEqual(counts.rows[0], { artifacts: 1, facts: 1 });
+  } finally {
+    await pool.close();
+  }
+});
+
+test("capture inserts use atomic conflict handling before reads", async () => {
+  const source = await readFile(
+    new URL("../src/persistence/capture-repository.ts", import.meta.url),
+    "utf8",
+  );
+  assert.equal((source.match(/ON CONFLICT \(clinic_id, id\) DO NOTHING/g) ?? []).length, 2);
+  assert.ok(source.indexOf("await insertArtifact") < source.indexOf("await findArtifact"));
+  assert.ok(source.indexOf("await insertFactCard") < source.indexOf("await findFactCard"));
+});
+
 test("conflicting Artifact replay fails without changing either row", async () => {
   const pool = new PGlitePoolShim();
   await pool.migrate();
@@ -238,7 +352,7 @@ test("conflicting Artifact replay fails without changing either row", async () =
     const original = capture();
     await repository.saveCapture(employee(), original.artifact, original.factCard);
     const conflict = capture();
-    conflict.artifact.identityAnchor = "PAT-DIFFERENT";
+    conflict.artifact.payload = { source: "different" };
     await assert.rejects(
       repository.saveCapture(employee(), conflict.artifact, conflict.factCard),
       (error: unknown) => error instanceof DomainError && error.code === "ARTIFACT_ID_CONFLICT",
