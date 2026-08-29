@@ -156,6 +156,53 @@ test("OPEN and UNMET with trusted trigger remain deterministic PENDING", () => {
   }
 });
 
+test("stale OPEN or UNMET snapshot conflicts when exact consequence already exists", () => {
+  for (const state of ["OPEN", "UNMET"] as const) {
+    const result = verifyS2({
+      workflow: workflow(),
+      expectation: expectation(state),
+      linkedArtifacts: [registration(), report()],
+      now: state === "OPEN" ? CONSEQUENCE_AT : DUE_AT,
+    });
+    assert.equal(result.status, "CONFLICT");
+    assert.ok(result.reasonCodes.includes("EXPECTATION_EVIDENCE_CONFLICT"));
+    assert.equal(result.consequenceArtifactId, "report");
+  }
+});
+
+test("future evidence is TIME_CONFLICT and never VERIFIED", () => {
+  const now = "2026-08-29T09:05:00.000Z";
+  const futureReport = report();
+  const fabricatedMet = verifyS2({
+    workflow: workflow(),
+    expectation: expectation("MET", { evaluatedAt: now }),
+    linkedArtifacts: [registration(), futureReport],
+    now,
+  });
+  assert.equal(fabricatedMet.status, "CONFLICT");
+  assert.ok(fabricatedMet.reasonCodes.includes("TIME_CONFLICT"));
+
+  const staleOpen = verifyS2({
+    workflow: workflow(),
+    expectation: expectation("OPEN", { evaluatedAt: now }),
+    linkedArtifacts: [registration(), futureReport],
+    now,
+  });
+  assert.equal(staleOpen.status, "CONFLICT");
+  assert.ok(staleOpen.reasonCodes.includes("TIME_CONFLICT"));
+});
+
+test("consequence exactly at explicit now and dueAt remains VERIFIED", () => {
+  const atBoundary = artifact("report", "EXAM_REPORT", DUE_AT);
+  const result = verifyS2({
+    workflow: workflow(),
+    expectation: expectation("MET", { satisfiedByArtifactId: "report", evaluatedAt: DUE_AT }),
+    linkedArtifacts: [registration(), atBoundary],
+    now: DUE_AT,
+  });
+  assert.equal(result.status, "VERIFIED");
+});
+
 test("Artifact input order does not change S2 output", () => {
   const first = verifyS2({
     workflow: workflow(), expectation: expectation(), linkedArtifacts: [registration(), report()], now: CONSEQUENCE_AT,

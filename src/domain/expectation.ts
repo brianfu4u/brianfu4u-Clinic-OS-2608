@@ -55,7 +55,7 @@ export function evaluateExpectation(
       "INVALID_ARTIFACT_TIME",
       "Consequence Artifact occurredAt",
     );
-    return occurredAt >= triggeredAt && occurredAt <= dueAt;
+    return occurredAt >= triggeredAt && occurredAt <= dueAt && occurredAt <= evaluatedAt;
   });
   if (matching) {
     return {

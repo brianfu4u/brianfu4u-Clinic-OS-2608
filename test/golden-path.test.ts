@@ -204,6 +204,21 @@ test("consequence occurring exactly at dueAt is MET", () => {
   assert.equal(result.satisfiedByArtifactId, "report");
 });
 
+test("future consequence cannot satisfy before explicit evaluation time", () => {
+  const futureReport = artifact({
+    id: "artifact-future-report",
+    kind: "EXAM_REPORT",
+    occurredAt: "2026-08-29T09:10:00.000Z",
+  });
+  const result = evaluateExpectation(
+    expectation(),
+    [futureReport],
+    "2026-08-29T09:05:00.000Z",
+  );
+  assert.equal(result.state, "OPEN");
+  assert.equal(result.satisfiedByArtifactId, null);
+});
+
 test("consequence before triggeredAt cannot satisfy an Expectation", () => {
   const oldReport = artifact({
     id: "old-report",

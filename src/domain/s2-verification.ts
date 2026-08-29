@@ -69,7 +69,8 @@ export function verifyS2(input: {
     artifact.identityAnchor === workflow.identityAnchor &&
     artifact.occurredAt !== null &&
     Number.isFinite(timestamp(artifact.occurredAt)) &&
-    timestamp(artifact.occurredAt) === triggeredAt
+    timestamp(artifact.occurredAt) === triggeredAt &&
+    timestamp(artifact.occurredAt) <= now
   ) ?? null;
 
   if (!trigger && expectation.state !== "VOIDED") {
@@ -81,7 +82,8 @@ export function verifyS2(input: {
     if (triggerKindCandidates.some((artifact) =>
       artifact.occurredAt === null ||
       !Number.isFinite(timestamp(artifact.occurredAt)) ||
-      timestamp(artifact.occurredAt) !== triggeredAt
+      timestamp(artifact.occurredAt) !== triggeredAt ||
+      timestamp(artifact.occurredAt) > now
     )) reasons.add("TIME_CONFLICT");
     if (artifacts.some((artifact) =>
       artifact.clinicId === workflow.clinicId &&
@@ -110,12 +112,42 @@ export function verifyS2(input: {
       if (
         !Number.isFinite(consequenceTime) ||
         consequenceTime < triggeredAt ||
-        consequenceTime > dueAt
+        consequenceTime > dueAt ||
+        consequenceTime > now
       ) reasons.add("TIME_CONFLICT");
     }
   } else if (expectation.state === "MET") {
     reasons.add("EXPECTATION_EVIDENCE_CONFLICT");
     reasons.add("CONSEQUENCE_NOT_FOUND");
+  } else if (expectation.state === "OPEN" || expectation.state === "UNMET") {
+    const exactConsequences = artifacts.filter((artifact) =>
+      artifact.clinicId === workflow.clinicId &&
+      artifact.identityAnchor === workflow.identityAnchor &&
+      artifact.kind === expectation.consequenceKind
+    );
+    consequence = exactConsequences.find((artifact) => {
+      const occurredAt = artifact.occurredAt === null
+        ? Number.NaN
+        : timestamp(artifact.occurredAt);
+      return Number.isFinite(occurredAt) &&
+        occurredAt >= triggeredAt &&
+        occurredAt <= dueAt &&
+        occurredAt <= now;
+    }) ?? null;
+    if (consequence) {
+      reasons.add("EXPECTATION_EVIDENCE_CONFLICT");
+    } else {
+      consequence = exactConsequences.find((artifact) => {
+        const occurredAt = artifact.occurredAt === null
+          ? Number.NaN
+          : timestamp(artifact.occurredAt);
+        return !Number.isFinite(occurredAt) ||
+          occurredAt < triggeredAt ||
+          occurredAt > dueAt ||
+          occurredAt > now;
+      }) ?? null;
+      if (consequence) reasons.add("TIME_CONFLICT");
+    }
   }
 
   let status: VerificationResult["status"];
