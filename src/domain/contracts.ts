@@ -1,5 +1,11 @@
 export type IsoTimestamp = string;
 
+export interface ActorContext {
+  clinicId: string;
+  actorId: string;
+  role: "EMPLOYEE" | "MANAGER";
+}
+
 export interface Artifact {
   id: string;
   clinicId: string;

@@ -2,15 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
 
+import type { ActorContext } from "../src/domain/contracts.ts";
 import { PreviewStore } from "../src/preview/preview-store.ts";
 import { createPreviewServer } from "../src/preview/server.ts";
 
 const REGISTRATION_AT = "2026-08-29T09:00:00.000Z";
 const REPORT_AT = "2026-08-29T09:10:00.000Z";
 const NOW = "2026-08-29T09:10:00.000Z";
+const EMPLOYEE_CONTEXT: ActorContext = {
+  clinicId: "demo-clinic",
+  actorId: "demo-employee",
+  role: "EMPLOYEE",
+};
+const MANAGER_CONTEXT: ActorContext = {
+  clinicId: "demo-clinic",
+  actorId: "demo-manager",
+  role: "MANAGER",
+};
 
 async function withServer(run: (baseUrl: string, store: PreviewStore) => Promise<void>) {
-  const store = new PreviewStore();
+  const store = new PreviewStore("demo-clinic");
   const server = createPreviewServer({ store, clock: () => NOW });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
@@ -95,7 +106,7 @@ test("ordinary conversation creates messages and no domain state", async () => {
     });
     assert.equal(sent.response.status, 201);
     assert.equal(sent.body.length, 2);
-    assert.deepEqual(store.debugCounts(), { artifacts: 0, workflows: 0, expectations: 0 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 0, workflows: 0, expectations: 0 });
     assert.deepEqual((await json(baseUrl, "/api/manager/closures")).body, []);
   });
 });
@@ -109,7 +120,7 @@ test("formal update while OFF_DUTY is rejected without mutation", async () => {
     });
     assert.equal(result.response.status, 400);
     assert.equal(result.body.error, "EMPLOYEE_NOT_ON_DUTY");
-    assert.deepEqual(store.debugCounts(), { artifacts: 0, workflows: 0, expectations: 0 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 0, workflows: 0, expectations: 0 });
   });
 });
 
@@ -123,7 +134,7 @@ test("valid registration creates OPEN quiet manager projection", async () => {
     });
     assert.equal(result.response.status, 201);
     assert.equal(result.body.expectationState, "OPEN");
-    assert.deepEqual(store.debugCounts(), { artifacts: 1, workflows: 1, expectations: 1 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 1, workflows: 1, expectations: 1 });
     const closures = (await json(baseUrl, "/api/manager/closures")).body;
     assert.equal(closures.length, 1);
     assert.equal(closures[0].expectationState, "OPEN");
@@ -134,12 +145,12 @@ test("valid registration creates OPEN quiet manager projection", async () => {
 });
 
 test("registration becomes UNMET exactly at its due boundary", () => {
-  const store = new PreviewStore();
-  store.setStatus("ON_DUTY");
-  const topic = store.createTopic("Synthetic tracer", REGISTRATION_AT);
-  store.submitWorkUpdate(update(topic.id, { now: REGISTRATION_AT }));
+  const store = new PreviewStore("demo-clinic");
+  store.setStatus(EMPLOYEE_CONTEXT, "ON_DUTY");
+  const topic = store.createTopic(EMPLOYEE_CONTEXT, "Synthetic tracer", REGISTRATION_AT);
+  store.submitWorkUpdate(EMPLOYEE_CONTEXT, update(topic.id, { now: REGISTRATION_AT }));
 
-  const [closure] = store.managerClosures("2026-08-29T09:15:00.000Z");
+  const [closure] = store.managerClosures(MANAGER_CONTEXT, "2026-08-29T09:15:00.000Z");
   assert.equal(closure.expectationState, "UNMET");
   assert.equal(closure.needsReview, true);
   assert.deepEqual(closure.reasonCodes, ["EXPECTATION_UNMET"]);
@@ -163,7 +174,7 @@ test("same-anchor EXAM_REPORT attaches to the same Workflow and becomes MET", as
     assert.equal(report.response.status, 201);
     assert.equal(report.body.workflowId, registration.body.workflowId);
     assert.equal(report.body.expectationState, "MET");
-    assert.deepEqual(store.debugCounts(), { artifacts: 2, workflows: 1, expectations: 1 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 2, workflows: 1, expectations: 1 });
     const [closure] = (await json(baseUrl, "/api/manager/closures")).body;
     assert.equal(closure.verificationStatus, "VERIFIED");
     assert.deepEqual(closure.verificationReasonCodes, []);
@@ -187,7 +198,7 @@ test("near-miss anchor cannot attach to the existing Workflow", async () => {
     });
     assert.equal(report.response.status, 400);
     assert.equal(report.body.error, "UNSUPPORTED_PREVIEW_SEQUENCE");
-    assert.deepEqual(store.debugCounts(), { artifacts: 1, workflows: 1, expectations: 1 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 1, workflows: 1, expectations: 1 });
   });
 });
 
@@ -201,7 +212,7 @@ test("report without registration is rejected rather than guessed", async () => 
     });
     assert.equal(report.response.status, 400);
     assert.equal(report.body.error, "UNSUPPORTED_PREVIEW_SEQUENCE");
-    assert.deepEqual(store.debugCounts(), { artifacts: 0, workflows: 0, expectations: 0 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 0, workflows: 0, expectations: 0 });
   });
 });
 
@@ -221,7 +232,7 @@ test("report dated before its exact-anchor registration is rejected", async () =
     });
     assert.equal(report.response.status, 400);
     assert.equal(report.body.error, "UNSUPPORTED_PREVIEW_SEQUENCE");
-    assert.deepEqual(store.debugCounts(), { artifacts: 1, workflows: 1, expectations: 1 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 1, workflows: 1, expectations: 1 });
   });
 });
 
@@ -259,7 +270,45 @@ test("malformed JSON and invalid enums return 4xx without mutation", async () =>
     assert.equal(invalid.response.status, 400);
     assert.equal(invalid.body.error, "INVALID_EMPLOYEE_STATUS");
     assert.equal((await json(baseUrl, "/api/employee/bootstrap")).body.status, "OFF_DUTY");
-    assert.deepEqual(store.debugCounts(), { artifacts: 0, workflows: 0, expectations: 0 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 0, workflows: 0, expectations: 0 });
+  });
+});
+
+test("employee HTTP bodies cannot inject authority fields", async () => {
+  await withServer(async (baseUrl, store) => {
+    const refusedStatus = await json(baseUrl, "/api/employee/status", {
+      method: "PUT",
+      body: JSON.stringify({ status: "ON_DUTY", clinicId: "other-clinic" }),
+    });
+    assert.equal(refusedStatus.response.status, 400);
+    assert.equal(refusedStatus.body.error, "FORBIDDEN_EMPLOYEE_FIELDS");
+    assert.equal((await json(baseUrl, "/api/employee/bootstrap")).body.status, "OFF_DUTY");
+
+    const refusedTopic = await json(baseUrl, "/api/employee/topics", {
+      method: "POST",
+      body: JSON.stringify({ title: "forged", ownerEmployeeId: "other-employee" }),
+    });
+    assert.equal(refusedTopic.response.status, 400);
+    assert.equal((await json(baseUrl, "/api/employee/bootstrap")).body.topics.length, 0);
+
+    await setOnDuty(baseUrl);
+    const topicId = await topic(baseUrl);
+    const refusedMessage = await json(baseUrl, "/api/employee/messages", {
+      method: "POST",
+      body: JSON.stringify({ topicId, text: "must not persist", employeeId: "other-employee" }),
+    });
+    assert.equal(refusedMessage.response.status, 400);
+    assert.equal((await json(baseUrl, "/api/employee/bootstrap")).body.messages.length, 0);
+
+    const refusedUpdate = await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST",
+      body: JSON.stringify({ ...update(topicId), sourceEmployeeId: "other-employee" }),
+    });
+    assert.equal(refusedUpdate.response.status, 400);
+    assert.deepEqual(
+      store.debugCounts(MANAGER_CONTEXT),
+      { artifacts: 0, workflows: 0, expectations: 0 },
+    );
   });
 });
 
@@ -283,7 +332,7 @@ test("synthetic anchor boundary rejects non-DEMO identities", async () => {
     });
     assert.equal(result.response.status, 400);
     assert.equal(result.body.error, "SYNTHETIC_ANCHOR_REQUIRED");
-    assert.deepEqual(store.debugCounts(), { artifacts: 0, workflows: 0, expectations: 0 });
+    assert.deepEqual(store.debugCounts(MANAGER_CONTEXT), { artifacts: 0, workflows: 0, expectations: 0 });
   });
 });
 
@@ -366,6 +415,9 @@ test("manager POST rejects caller-controlled authority and lineage fields", asyn
         verification: { status: "VERIFIED" },
         verificationStatus: "VERIFIED",
         verificationReasonCodes: [],
+        employeeId: "other-employee",
+        ownerEmployeeId: "other-employee",
+        sourceEmployeeId: "other-employee",
       }),
     });
     assert.equal(refused.response.status, 400);
@@ -378,6 +430,27 @@ test("manager POST rejects caller-controlled authority and lineage fields", asyn
     const [projection] = (await json(baseUrl, "/api/manager/closures")).body;
     assert.equal(projection.workflowStatus, "OPEN");
   });
+});
+
+test("server adapter injects configured contexts and rejects cross-clinic manager scope", async () => {
+  const store = new PreviewStore("demo-clinic");
+  const server = createPreviewServer({
+    store,
+    clock: () => NOW,
+    employeeContext: EMPLOYEE_CONTEXT,
+    managerContext: { ...MANAGER_CONTEXT, clinicId: "other-clinic" },
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const result = await json(`http://127.0.0.1:${port}`, "/api/manager/closures");
+    assert.equal(result.response.status, 400);
+    assert.equal(result.body.error, "TENANT_SCOPE_VIOLATION");
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve())
+    );
+  }
 });
 
 test("terminal Workflow cannot serve as registration for a later report", async () => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  ActorContext,
   Expectation,
   ManagerDecisionAction,
   VerificationResult,
@@ -19,6 +20,16 @@ import {
 const CLINIC_ID = "clinic-1";
 const WORKFLOW_ID = "workflow-1";
 const NOW = "2026-08-29T09:15:00.000Z";
+const MANAGER_CONTEXT: ActorContext = {
+  clinicId: CLINIC_ID,
+  actorId: "manager-1",
+  role: "MANAGER",
+};
+const EMPLOYEE_CONTEXT: ActorContext = {
+  clinicId: CLINIC_ID,
+  actorId: "employee-1",
+  role: "EMPLOYEE",
+};
 
 function workflow(overrides: Partial<Workflow> = {}): Workflow {
   return {
@@ -80,18 +91,19 @@ function decisionInput(
 ): ManagerDecisionInput {
   return {
     id: "decision-1",
-    clinicId: CLINIC_ID,
     workflowId: WORKFLOW_ID,
     expectation: expectation(state),
     verification: verification(state),
     action,
     reasonCode: null,
     note: null,
-    actorId: "manager-1",
-    actorRole: "MANAGER",
     decidedAt: NOW,
     ...overrides,
   };
+}
+
+function decide(store: WorkflowSaga, input: ManagerDecisionInput) {
+  return store.recordManagerDecision(MANAGER_CONTEXT, input);
 }
 
 function verification(
@@ -118,7 +130,7 @@ function verification(
 
 test("CLOSE_STANDARD closes MET and stores an immutable decision", () => {
   const store = saga();
-  const result = store.recordManagerDecision(decisionInput());
+  const result = decide(store, decisionInput());
 
   assert.equal(result.workflow.status, "CLOSED");
   assert.equal(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID).length, 1);
@@ -136,7 +148,7 @@ test("CLOSE_STANDARD refuses OPEN and UNMET without mutation", () => {
   for (const state of ["OPEN", "UNMET"] as const) {
     const store = saga();
     assert.throws(
-      () => store.recordManagerDecision(decisionInput(state)),
+      () => decide(store, decisionInput(state)),
       (error) => error instanceof DomainError && error.code === "DECISION_NOT_ALLOWED",
     );
     assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
@@ -148,14 +160,14 @@ test("CLOSE_EXCEPTION closes UNMET only with a controlled reason", () => {
   for (const reasonCode of [null, "free text"]) {
     const store = saga();
     assert.throws(
-      () => store.recordManagerDecision(decisionInput("UNMET", "CLOSE_EXCEPTION", { reasonCode })),
+      () => decide(store, decisionInput("UNMET", "CLOSE_EXCEPTION", { reasonCode })),
       DomainError,
     );
     assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
     assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
   }
   const store = saga();
-  const result = store.recordManagerDecision(decisionInput("UNMET", "CLOSE_EXCEPTION", {
+  const result = decide(store, decisionInput("UNMET", "CLOSE_EXCEPTION", {
     reasonCode: "LEGITIMATE_DEVIATION",
   }));
   assert.equal(result.workflow.status, "CLOSED");
@@ -165,7 +177,7 @@ test("CLOSE_EXCEPTION closes UNMET only with a controlled reason", () => {
 test("KEEP_OPEN preserves an UNMET review item", () => {
   const store = saga();
   const input = decisionInput("UNMET", "KEEP_OPEN", { reasonCode: "NEEDS_MORE_EVIDENCE" });
-  const result = store.recordManagerDecision(input);
+  const result = decide(store, input);
   const view = projectManagerClosure({
     workflow: result.workflow,
     expectation: input.expectation,
@@ -180,13 +192,13 @@ test("KEEP_OPEN preserves an UNMET review item", () => {
 test("VOID requires a reason and projects terminal VOIDED", () => {
   const refused = saga();
   assert.throws(
-    () => refused.recordManagerDecision(decisionInput("OPEN", "VOID")),
+    () => decide(refused, decisionInput("OPEN", "VOID")),
     (error) => error instanceof DomainError && error.code === "DECISION_NOT_ALLOWED",
   );
 
   const store = saga();
   const input = decisionInput("OPEN", "VOID", { reasonCode: "PATIENT_CANCELLED" });
-  const result = store.recordManagerDecision(input);
+  const result = decide(store, input);
   const view = projectManagerClosure({
     workflow: result.workflow,
     expectation: input.expectation,
@@ -199,11 +211,9 @@ test("VOID requires a reason and projects terminal VOIDED", () => {
 
 test("non-manager actor is refused before mutation", () => {
   const store = saga();
-  const input = decisionInput() as ManagerDecisionInput & { actorRole: string };
-  input.actorRole = "AGENT";
   assert.throws(
-    () => store.recordManagerDecision(input as ManagerDecisionInput),
-    (error) => error instanceof DomainError && error.code === "MANAGER_ROLE_REQUIRED",
+    () => store.recordManagerDecision(EMPLOYEE_CONTEXT, decisionInput()),
+    (error) => error instanceof DomainError && error.code === "ROLE_SCOPE_VIOLATION",
   );
   assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
   assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
@@ -212,13 +222,13 @@ test("non-manager actor is refused before mutation", () => {
 test("same decision is idempotent and conflicting ID reuse fails", () => {
   const store = saga();
   const input = decisionInput();
-  const first = store.recordManagerDecision(input);
-  const second = store.recordManagerDecision(input);
+  const first = decide(store, input);
+  const second = decide(store, input);
   assert.deepEqual(second, first);
   assert.equal(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID).length, 1);
 
   assert.throws(
-    () => store.recordManagerDecision({ ...input, note: "different" }),
+    () => decide(store, { ...input, note: "different" }),
     (error) => error instanceof DomainError && error.code === "DECISION_ID_CONFLICT",
   );
   assert.equal(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID).length, 1);
@@ -226,9 +236,9 @@ test("same decision is idempotent and conflicting ID reuse fails", () => {
 
 test("terminal Workflow rejects a different later decision", () => {
   const store = saga();
-  store.recordManagerDecision(decisionInput());
+  decide(store, decisionInput());
   assert.throws(
-    () => store.recordManagerDecision(decisionInput("MET", "VOID", {
+    () => decide(store, decisionInput("MET", "VOID", {
       id: "decision-2",
       reasonCode: "DUPLICATE_WORKFLOW",
     })),
@@ -239,7 +249,7 @@ test("terminal Workflow rejects a different later decision", () => {
 
 test("decision evidence is derived exactly from links visible at decision time", () => {
   const store = saga();
-  const result = store.recordManagerDecision(decisionInput());
+  const result = decide(store, decisionInput());
   assert.deepEqual(
     result.decision.evidenceArtifactIds,
     store.listLinks(CLINIC_ID, WORKFLOW_ID).map(({ artifactId }) => artifactId),
@@ -252,7 +262,7 @@ test("failed decision append leaves Workflow and ledger unchanged", () => {
       throw new Error("synthetic decision append failure");
     },
   });
-  assert.throws(() => store.recordManagerDecision(decisionInput()), /synthetic decision append failure/);
+  assert.throws(() => decide(store, decisionInput()), /synthetic decision append failure/);
   assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
   assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
 });
@@ -262,7 +272,7 @@ test("closed exception projection preserves UNMET history without review", () =>
   const input = decisionInput("UNMET", "CLOSE_EXCEPTION", {
     reasonCode: "LEGITIMATE_DEVIATION",
   });
-  const result = store.recordManagerDecision(input);
+  const result = decide(store, input);
   const view = projectManagerClosure({
     workflow: result.workflow,
     expectation: input.expectation,
@@ -280,7 +290,7 @@ test("forged MET snapshot cannot close without linked satisfying evidence", () =
       expectation: expectation("MET", { satisfiedByArtifactId }),
     });
     assert.throws(
-      () => store.recordManagerDecision(input),
+      () => decide(store, input),
       (error) =>
         error instanceof DomainError &&
         error.code === "INVALID_DECISION_EVIDENCE_SNAPSHOT",
@@ -297,7 +307,7 @@ test("non-MET snapshot cannot claim satisfying evidence", () => {
     expectation: expectation("UNMET", { satisfiedByArtifactId: "artifact-report" }),
   });
   assert.throws(
-    () => store.recordManagerDecision(input),
+    () => decide(store, input),
     (error) =>
       error instanceof DomainError &&
       error.code === "INVALID_DECISION_EVIDENCE_SNAPSHOT",
@@ -313,7 +323,7 @@ test("future or invalid Expectation evaluation cannot authorize a decision", () 
       expectation: expectation("MET", { evaluatedAt }),
     });
     assert.throws(
-      () => store.recordManagerDecision(input),
+      () => decide(store, input),
       (error) =>
         error instanceof DomainError &&
         error.code === "INVALID_DECISION_SNAPSHOT_TIME",
@@ -331,7 +341,7 @@ test("decision lineage excludes links attached after decidedAt", () => {
       { ...link("artifact-future"), attachedAt: "2026-08-29T09:15:00.001Z" },
     ],
   });
-  const result = store.recordManagerDecision(decisionInput());
+  const result = decide(store, decisionInput());
   assert.deepEqual(result.decision.evidenceArtifactIds, [
     "artifact-registration",
     "artifact-report",
@@ -343,7 +353,7 @@ test("invalid link time fails decision snapshot closed", () => {
     initialLinks: [link("artifact-registration"), { ...link("artifact-report"), attachedAt: "bad" }],
   });
   assert.throws(
-    () => store.recordManagerDecision(decisionInput()),
+    () => decide(store, decisionInput()),
     (error) =>
       error instanceof DomainError &&
       error.code === "INVALID_DECISION_LINK_TIME",
@@ -379,7 +389,7 @@ test("standard close refuses conflicting or fabricated Verification snapshots", 
   ];
   for (const input of inputs) {
     const store = saga();
-    assert.throws(() => store.recordManagerDecision(input), DomainError);
+    assert.throws(() => decide(store, input), DomainError);
     assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
     assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
   }

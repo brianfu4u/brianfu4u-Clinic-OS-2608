@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { DomainError } from "../domain/errors.ts";
-import type { ManagerDecisionAction } from "../domain/contracts.ts";
+import type { ActorContext, ManagerDecisionAction } from "../domain/contracts.ts";
+import { assertActorAccess, assertActorContext } from "../domain/access-context.ts";
 import { PreviewStore, type EmployeeStatus } from "./preview-store.ts";
 
 const PUBLIC_FILES = new Map([
@@ -15,13 +16,29 @@ const INDEX_FILE = fileURLToPath(new URL("./public/index.html", import.meta.url)
 export function createPreviewServer(options: {
   store?: PreviewStore;
   clock?: () => string;
+  employeeContext?: ActorContext;
+  managerContext?: ActorContext;
 } = {}) {
-  const store = options.store ?? new PreviewStore();
+  const employeeContext = options.employeeContext ?? {
+    clinicId: "demo-clinic",
+    actorId: "demo-employee",
+    role: "EMPLOYEE",
+  };
+  const managerContext = options.managerContext ?? {
+    clinicId: "demo-clinic",
+    actorId: "demo-manager",
+    role: "MANAGER",
+  };
+  assertActorContext(employeeContext);
+  assertActorContext(managerContext);
+  assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
+  assertActorAccess(managerContext, managerContext.clinicId, "MANAGER");
+  const store = options.store ?? new PreviewStore(employeeContext.clinicId);
   const clock = options.clock ?? (() => new Date().toISOString());
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, store, clock);
+      await route(request, response, store, clock, employeeContext, managerContext);
     } catch (error) {
       if (error instanceof DomainError) {
         sendJson(response, 400, { error: error.code, message: error.message });
@@ -37,6 +54,8 @@ async function route(
   response: ServerResponse,
   store: PreviewStore,
   clock: () => string,
+  employeeContext: ActorContext,
+  managerContext: ActorContext,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -62,31 +81,41 @@ async function route(
     return;
   }
   if (method === "GET" && path === "/api/employee/bootstrap") {
-    sendJson(response, 200, store.bootstrap());
+    sendJson(response, 200, store.bootstrap(employeeContext));
     return;
   }
   if (method === "PUT" && path === "/api/employee/status") {
     const body = await jsonBody(request);
-    sendJson(response, 200, { status: store.setStatus(body.status as EmployeeStatus) });
+    rejectUnexpectedKeys(body, ["status"], "FORBIDDEN_EMPLOYEE_FIELDS");
+    sendJson(response, 200, {
+      status: store.setStatus(employeeContext, body.status as EmployeeStatus),
+    });
     return;
   }
   if (method === "POST" && path === "/api/employee/topics") {
     const body = await jsonBody(request);
-    sendJson(response, 201, store.createTopic(asString(body.title), clock()));
+    rejectUnexpectedKeys(body, ["title"], "FORBIDDEN_EMPLOYEE_FIELDS");
+    sendJson(response, 201, store.createTopic(employeeContext, asString(body.title), clock()));
     return;
   }
   if (method === "POST" && path === "/api/employee/messages") {
     const body = await jsonBody(request);
+    rejectUnexpectedKeys(body, ["topicId", "text"], "FORBIDDEN_EMPLOYEE_FIELDS");
     sendJson(
       response,
       201,
-      store.addConversation(asString(body.topicId), asString(body.text), clock()),
+      store.addConversation(employeeContext, asString(body.topicId), asString(body.text), clock()),
     );
     return;
   }
   if (method === "POST" && path === "/api/employee/work-updates") {
     const body = await jsonBody(request);
-    sendJson(response, 201, store.submitWorkUpdate({
+    rejectUnexpectedKeys(
+      body,
+      ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text"],
+      "FORBIDDEN_EMPLOYEE_FIELDS",
+    );
+    sendJson(response, 201, store.submitWorkUpdate(employeeContext, {
       topicId: asString(body.topicId),
       kind: asString(body.kind) as "REGISTRATION" | "EXAM_REPORT",
       identityAnchor: asString(body.identityAnchor),
@@ -98,13 +127,17 @@ async function route(
     return;
   }
   if (method === "GET" && path === "/api/manager/closures") {
-    sendJson(response, 200, store.managerClosures(clock()));
+    sendJson(response, 200, store.managerClosures(managerContext, clock()));
     return;
   }
   if (method === "POST" && path === "/api/manager/decisions") {
     const body = await jsonBody(request);
-    rejectUnexpectedKeys(body, ["workflowId", "action", "reasonCode", "note"]);
-    sendJson(response, 201, store.submitManagerDecision({
+    rejectUnexpectedKeys(
+      body,
+      ["workflowId", "action", "reasonCode", "note"],
+      "FORBIDDEN_MANAGER_FIELDS",
+    );
+    sendJson(response, 201, store.submitManagerDecision(managerContext, {
       workflowId: asString(body.workflowId),
       action: asString(body.action) as ManagerDecisionAction,
       reasonCode: asNullableString(body.reasonCode),
@@ -114,7 +147,14 @@ async function route(
     return;
   }
   if (method === "GET" && path === "/api/manager/decisions") {
-    sendJson(response, 200, store.managerDecisionHistory(asString(url.searchParams.get("workflowId"))));
+    sendJson(
+      response,
+      200,
+      store.managerDecisionHistory(
+        managerContext,
+        asString(url.searchParams.get("workflowId")),
+      ),
+    );
     return;
   }
   sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
@@ -132,12 +172,16 @@ function asNullableString(value: unknown): string | null {
   return asString(value);
 }
 
-function rejectUnexpectedKeys(body: Record<string, unknown>, allowed: readonly string[]): void {
+function rejectUnexpectedKeys(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+  code: string,
+): void {
   const unexpected = Object.keys(body).filter((key) => !allowed.includes(key));
   if (unexpected.length > 0) {
     throw new DomainError(
-      "FORBIDDEN_MANAGER_FIELDS",
-      `Manager decision fields are server-controlled: ${unexpected.join(", ")}.`,
+      code,
+      `Authority and application fields are server-controlled: ${unexpected.join(", ")}.`,
     );
   }
 }

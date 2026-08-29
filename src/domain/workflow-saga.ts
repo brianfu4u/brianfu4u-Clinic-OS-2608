@@ -1,4 +1,5 @@
 import type {
+  ActorContext,
   Artifact,
   EvidenceFactCard,
   Expectation,
@@ -8,6 +9,7 @@ import type {
   Workflow,
   WorkflowArtifactLink,
 } from "./contracts.ts";
+import { assertActorContext } from "./access-context.ts";
 import { DomainError } from "./errors.ts";
 import { assertAttachIdentity } from "./identity-gate.ts";
 
@@ -25,15 +27,12 @@ export interface WorkflowSagaOptions {
 
 export interface ManagerDecisionInput {
   id: string;
-  clinicId: string;
   workflowId: string;
   expectation: Expectation;
   verification: VerificationResult;
   action: ManagerDecisionAction;
   reasonCode: string | null;
   note: string | null;
-  actorId: string;
-  actorRole: "MANAGER";
   decidedAt: string;
 }
 
@@ -123,23 +122,27 @@ export class WorkflowSaga {
       .map((decision) => structuredClone(decision));
   }
 
-  recordManagerDecision(input: ManagerDecisionInput): DecisionSagaResult {
-    if (input.actorRole !== "MANAGER") {
-      throw new DomainError("MANAGER_ROLE_REQUIRED", "Only a manager may decide a Workflow.");
+  recordManagerDecision(context: ActorContext, input: ManagerDecisionInput): DecisionSagaResult {
+    assertActorContext(context);
+    if (context.role !== "MANAGER") {
+      throw new DomainError("ROLE_SCOPE_VIOLATION", "This operation requires the MANAGER role.");
     }
     const decidedAt = Date.parse(input.decidedAt);
-    if (!input.id || !input.actorId || !Number.isFinite(decidedAt)) {
-      throw new DomainError("INVALID_MANAGER_DECISION", "Decision ID, actor and timestamp are required.");
+    if (!input.id || !Number.isFinite(decidedAt)) {
+      throw new DomainError("INVALID_MANAGER_DECISION", "Decision ID and timestamp are required.");
     }
     if (!["CLOSE_STANDARD", "CLOSE_EXCEPTION", "KEEP_OPEN", "VOID"].includes(input.action)) {
       throw new DomainError("INVALID_MANAGER_ACTION", "Unknown manager action.");
     }
     const workflow = this.#workflows.get(input.workflowId);
-    if (!workflow || workflow.clinicId !== input.clinicId) {
+    if (!workflow) {
       throw new DomainError("WORKFLOW_NOT_FOUND", "Workflow is not readable in this clinic.");
     }
+    if (workflow.clinicId !== context.clinicId) {
+      throw new DomainError("TENANT_SCOPE_VIOLATION", "Workflow is outside this clinic scope.");
+    }
     if (
-      input.expectation.clinicId !== input.clinicId ||
+      input.expectation.clinicId !== context.clinicId ||
       input.expectation.workflowId !== input.workflowId ||
       !input.expectation.id
     ) {
@@ -153,7 +156,7 @@ export class WorkflowSaga {
         "Expectation evaluation must be valid and no later than the decision.",
       );
     }
-    const visibleArtifactIds = this.listLinks(input.clinicId, input.workflowId)
+    const visibleArtifactIds = this.listLinks(context.clinicId, input.workflowId)
       .filter((link) => {
         const attachedAt = Date.parse(link.attachedAt);
         if (!Number.isFinite(attachedAt)) {
@@ -242,13 +245,13 @@ export class WorkflowSaga {
     }
     const decision: ManagerDecision = {
       id: input.id,
-      clinicId: input.clinicId,
+      clinicId: context.clinicId,
       workflowId: input.workflowId,
       expectationId: input.expectation.id,
       action: input.action,
       reasonCode,
       note: nullableText(input.note, 500, "INVALID_DECISION_NOTE"),
-      actorId: input.actorId,
+      actorId: context.actorId,
       actorRole: "MANAGER",
       decidedAt: input.decidedAt,
       evidenceArtifactIds: visibleArtifactIds,

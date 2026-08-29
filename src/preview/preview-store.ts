@@ -1,4 +1,5 @@
 import type {
+  ActorContext,
   Artifact,
   EvidenceFactCard,
   Expectation,
@@ -8,6 +9,7 @@ import type {
   VerificationResult,
   Workflow,
 } from "../domain/contracts.ts";
+import { assertActorAccess, assertActorContext } from "../domain/access-context.ts";
 import { DomainError } from "../domain/errors.ts";
 import { evaluateExpectation } from "../domain/expectation.ts";
 import {
@@ -21,12 +23,16 @@ export type EmployeeStatus = "ON_DUTY" | "ON_BREAK" | "OFF_DUTY";
 
 export interface PreviewTopic {
   id: string;
+  clinicId: string;
+  ownerEmployeeId: string;
   title: string;
   createdAt: string;
 }
 
 export interface PreviewMessage {
   id: string;
+  clinicId: string;
+  ownerEmployeeId: string;
   topicId: string;
   role: "EMPLOYEE" | "LOCAL_SYSTEM";
   type: "CONVERSATION" | "WORK_UPDATE" | "WORK_UPDATE_RESULT";
@@ -46,10 +52,6 @@ interface StoredExpectation {
   expectation: Expectation;
   identityAnchor: string;
 }
-
-const CLINIC_ID = "demo-clinic";
-const EMPLOYEE_ID = "demo-employee";
-const MANAGER_ID = "demo-manager";
 
 function requireTimestamp(value: string, label: string): string {
   if (!Number.isFinite(Date.parse(value))) {
@@ -71,34 +73,49 @@ export class PreviewStore {
   readonly #topics = new Map<string, PreviewTopic>();
   readonly #messages: PreviewMessage[] = [];
   readonly #expectations = new Map<string, StoredExpectation>();
-  #status: EmployeeStatus = "OFF_DUTY";
+  readonly #clinicId: string;
+  readonly #statuses = new Map<string, EmployeeStatus>();
   #nextId = 1;
 
-  bootstrap(): {
+  constructor(clinicId: string) {
+    assertActorContext({ clinicId, actorId: "preview-runtime", role: "MANAGER" });
+    this.#clinicId = clinicId;
+  }
+
+  bootstrap(context: ActorContext): {
     employeeId: string;
     status: EmployeeStatus;
     topics: PreviewTopic[];
     messages: PreviewMessage[];
   } {
+    this.#employee(context);
     return {
-      employeeId: EMPLOYEE_ID,
-      status: this.#status,
-      topics: structuredClone([...this.#topics.values()]),
-      messages: structuredClone(this.#messages),
+      employeeId: context.actorId,
+      status: this.#statuses.get(context.actorId) ?? "OFF_DUTY",
+      topics: structuredClone([...this.#topics.values()].filter((topic) =>
+        topic.clinicId === context.clinicId && topic.ownerEmployeeId === context.actorId
+      )),
+      messages: structuredClone(this.#messages.filter((message) =>
+        message.clinicId === context.clinicId && message.ownerEmployeeId === context.actorId
+      )),
     };
   }
 
-  setStatus(status: EmployeeStatus): EmployeeStatus {
+  setStatus(context: ActorContext, status: EmployeeStatus): EmployeeStatus {
+    this.#employee(context);
     if (!["ON_DUTY", "ON_BREAK", "OFF_DUTY"].includes(status)) {
       throw new DomainError("INVALID_EMPLOYEE_STATUS", "Unknown employee status.");
     }
-    this.#status = status;
+    this.#statuses.set(context.actorId, status);
     return status;
   }
 
-  createTopic(title: string, now: string): PreviewTopic {
+  createTopic(context: ActorContext, title: string, now: string): PreviewTopic {
+    this.#employee(context);
     const topic: PreviewTopic = {
       id: this.#id("topic"),
+      clinicId: context.clinicId,
+      ownerEmployeeId: context.actorId,
       title: requireText(title, "Topic title", 100),
       createdAt: requireTimestamp(now, "Topic createdAt"),
     };
@@ -106,10 +123,17 @@ export class PreviewStore {
     return structuredClone(topic);
   }
 
-  addConversation(topicId: string, text: string, now: string): PreviewMessage[] {
-    this.#requireTopic(topicId);
+  addConversation(
+    context: ActorContext,
+    topicId: string,
+    text: string,
+    now: string,
+  ): PreviewMessage[] {
+    this.#employee(context);
+    this.#requireTopic(context, topicId);
     const createdAt = requireTimestamp(now, "Message createdAt");
     const employeeMessage = this.#addMessage(
+      context,
       topicId,
       "EMPLOYEE",
       "CONVERSATION",
@@ -117,6 +141,7 @@ export class PreviewStore {
       createdAt,
     );
     const acknowledgement = this.#addMessage(
+      context,
       topicId,
       "LOCAL_SYSTEM",
       "CONVERSATION",
@@ -126,7 +151,7 @@ export class PreviewStore {
     return structuredClone([employeeMessage, acknowledgement]);
   }
 
-  submitWorkUpdate(input: {
+  submitWorkUpdate(context: ActorContext, input: {
     topicId: string;
     kind: "REGISTRATION" | "EXAM_REPORT";
     identityAnchor: string;
@@ -134,9 +159,16 @@ export class PreviewStore {
     occurredAt: string;
     text: string;
     now: string;
-  }): { workflowId: string; expectationState: Expectation["state"] } {
-    this.#requireTopic(input.topicId);
-    if (this.#status !== "ON_DUTY") {
+  }): {
+    artifactId: string;
+    clinicId: string;
+    sourceEmployeeId: string;
+    workflowId: string;
+    expectationState: Expectation["state"];
+  } {
+    this.#employee(context);
+    this.#requireTopic(context, input.topicId);
+    if (this.#statuses.get(context.actorId) !== "ON_DUTY") {
       throw new DomainError("EMPLOYEE_NOT_ON_DUTY", "Formal work updates require ON_DUTY status.");
     }
     if (!["REGISTRATION", "EXAM_REPORT"].includes(input.kind)) {
@@ -159,7 +191,7 @@ export class PreviewStore {
     const prior = [...this.#expectations.entries()].find(
       ([workflowId, { identityAnchor: anchor }]) =>
         anchor === identityAnchor &&
-        this.#repositories.workflows.getWorkflow(CLINIC_ID, workflowId)?.status === "OPEN",
+        this.#repositories.workflows.getWorkflow(context.clinicId, workflowId)?.status === "OPEN",
     )?.[1];
     if (
       input.kind === "EXAM_REPORT" &&
@@ -173,11 +205,11 @@ export class PreviewStore {
 
     const artifact: Artifact = {
       id: this.#id("artifact"),
-      clinicId: CLINIC_ID,
+      clinicId: context.clinicId,
       kind: input.kind,
       occurredAt,
       occurredAtSource: "employee_confirmed",
-      sourceEmployeeId: EMPLOYEE_ID,
+      sourceEmployeeId: context.actorId,
       identityAnchor,
       payload: { text, synthetic: true },
       createdAt: now,
@@ -208,8 +240,9 @@ export class PreviewStore {
       expectation: result.expectation,
       identityAnchor,
     });
-    this.#addMessage(input.topicId, "EMPLOYEE", "WORK_UPDATE", text, now);
+    this.#addMessage(context, input.topicId, "EMPLOYEE", "WORK_UPDATE", text, now);
     this.#addMessage(
+      context,
       input.topicId,
       "LOCAL_SYSTEM",
       "WORK_UPDATE_RESULT",
@@ -217,16 +250,20 @@ export class PreviewStore {
       now,
     );
     return {
+      artifactId: artifact.id,
+      clinicId: context.clinicId,
+      sourceEmployeeId: context.actorId,
       workflowId: result.workflow.id,
       expectationState: result.expectation.state,
     };
   }
 
-  managerClosures(now: string): ManagerPreviewItem[] {
+  managerClosures(context: ActorContext, now: string): ManagerPreviewItem[] {
+    this.#manager(context);
     const evaluatedAt = requireTimestamp(now, "Manager projection time");
     return [...this.#expectations.entries()].map(([workflowId, stored]) => {
       const current = this.#currentWorkflow(workflowId, evaluatedAt);
-      const decisions = this.#repositories.workflows.listManagerDecisions(CLINIC_ID, workflowId);
+      const decisions = this.#repositories.workflows.listManagerDecisions(context.clinicId, workflowId);
       const latest = decisions.at(-1);
       return this.#managerItem(
         stored,
@@ -239,29 +276,27 @@ export class PreviewStore {
     });
   }
 
-  submitManagerDecision(input: {
+  submitManagerDecision(context: ActorContext, input: {
     workflowId: string;
     action: ManagerDecisionAction;
     reasonCode: string | null;
     note: string | null;
     now: string;
   }): { decision: ManagerDecision; managerItem: ManagerPreviewItem } {
+    this.#manager(context);
     const now = requireTimestamp(input.now, "Manager decision time");
     const stored = this.#expectations.get(input.workflowId);
     if (!stored) throw new DomainError("WORKFLOW_NOT_FOUND", "Preview Workflow was not found.");
     const current = this.#currentWorkflow(input.workflowId, now);
     stored.expectation = current.expectation;
-    const result = this.#repositories.workflows.recordManagerDecision({
+    const result = this.#repositories.workflows.recordManagerDecision(context, {
       id: this.#id("decision"),
-      clinicId: CLINIC_ID,
       workflowId: input.workflowId,
       expectation: current.expectation,
       verification: current.verification,
       action: input.action,
       reasonCode: input.reasonCode,
       note: input.note,
-      actorId: MANAGER_ID,
-      actorRole: "MANAGER",
       decidedAt: now,
     });
     return {
@@ -277,24 +312,30 @@ export class PreviewStore {
     };
   }
 
-  managerDecisionHistory(workflowId: string): ManagerDecision[] {
+  managerDecisionHistory(context: ActorContext, workflowId: string): ManagerDecision[] {
+    this.#manager(context);
     if (!this.#expectations.has(workflowId)) {
       throw new DomainError("WORKFLOW_NOT_FOUND", "Preview Workflow was not found.");
     }
-    return this.#repositories.workflows.listManagerDecisions(CLINIC_ID, workflowId);
+    return this.#repositories.workflows.listManagerDecisions(context.clinicId, workflowId);
   }
 
-  debugCounts(): { artifacts: number; workflows: number; expectations: number } {
+  debugCounts(context: ActorContext): { artifacts: number; workflows: number; expectations: number } {
+    this.#manager(context);
     return {
       artifacts: this.#messages.filter(({ type }) => type === "WORK_UPDATE").length,
-      workflows: this.#repositories.workflows.listOpenWorkflows(CLINIC_ID).length,
+      workflows: this.#repositories.workflows.listOpenWorkflows(context.clinicId).length,
       expectations: this.#expectations.size,
     };
   }
 
-  #requireTopic(topicId: string): PreviewTopic {
+  #requireTopic(context: ActorContext, topicId: string): PreviewTopic {
     const topic = this.#topics.get(topicId);
-    if (!topic) throw new DomainError("TOPIC_NOT_FOUND", "Preview topic was not found.");
+    if (
+      !topic ||
+      topic.clinicId !== context.clinicId ||
+      topic.ownerEmployeeId !== context.actorId
+    ) throw new DomainError("TOPIC_NOT_FOUND", "Preview topic was not found.");
     return topic;
   }
 
@@ -305,12 +346,12 @@ export class PreviewStore {
     artifacts: Artifact[];
   } {
     const stored = this.#expectations.get(workflowId);
-    const workflow = this.#repositories.workflows.getWorkflow(CLINIC_ID, workflowId);
+    const workflow = this.#repositories.workflows.getWorkflow(this.#clinicId, workflowId);
     if (!stored || !workflow) {
       throw new DomainError("WORKFLOW_NOT_FOUND", "Stored preview Workflow is unavailable.");
     }
-    const artifacts = this.#repositories.workflows.listLinks(CLINIC_ID, workflowId)
-      .map((link) => this.#repositories.artifacts.get(CLINIC_ID, link.artifactId))
+    const artifacts = this.#repositories.workflows.listLinks(this.#clinicId, workflowId)
+      .map((link) => this.#repositories.artifacts.get(this.#clinicId, link.artifactId))
       .filter((artifact): artifact is Artifact => artifact !== null);
     const expectation = evaluateExpectation(stored.expectation, artifacts, now);
     const verification = verifyS2({ workflow, expectation, linkedArtifacts: artifacts, now });
@@ -353,19 +394,37 @@ export class PreviewStore {
   }
 
   #addMessage(
+    context: ActorContext,
     topicId: string,
     role: PreviewMessage["role"],
     type: PreviewMessage["type"],
     text: string,
     createdAt: string,
   ): PreviewMessage {
-    const message = { id: this.#id("message"), topicId, role, type, text, createdAt };
+    const message = {
+      id: this.#id("message"),
+      clinicId: context.clinicId,
+      ownerEmployeeId: context.actorId,
+      topicId,
+      role,
+      type,
+      text,
+      createdAt,
+    };
     this.#messages.push(message);
     return message;
   }
 
   #id(prefix: string): string {
     return `${prefix}-${this.#nextId++}`;
+  }
+
+  #employee(context: ActorContext): void {
+    assertActorAccess(context, this.#clinicId, "EMPLOYEE");
+  }
+
+  #manager(context: ActorContext): void {
+    assertActorAccess(context, this.#clinicId, "MANAGER");
   }
 }
 
