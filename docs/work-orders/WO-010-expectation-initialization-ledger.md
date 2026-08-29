@@ -1,6 +1,6 @@
 # WO-010 — Expectation Initialization Ledger
 
-**Status:** APPROVED FOR BUILD  
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -127,3 +127,16 @@ npm run runtime:demo
 ## 10. Builder handoff
 
 The Builder must read the Constitution and WO-007 through WO-010, implement only this slice, run all acceptance commands, commit as `feat(persistence): add expectation initialization ledger`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 11. Architecture acceptance
+
+Accepted on 2026-08-29 through `8bf1074` after independent review.
+
+- 162/162 tests and both demos pass.
+- Initialization requires an exact, linked trigger Artifact on an open tenant-scoped Workflow.
+- Current projection and immutable initialization transition commit atomically.
+- Each Expectation has at most one NULL-`from_state` initialization transition.
+- Valid non-NULL historical states remain schema-compatible for WO-011 without weakening the initialization invariant.
+- Transition RLS, composite tenant foreign keys and append-only protection fail closed.
+
+Real PostgreSQL application-role RLS, multi-worker concurrency, backup and restore remain deployment acceptance gates.
