@@ -1,33 +1,16 @@
-import type { SqlClient } from "./migration-runner.ts";
 import { applyMigrations, loadRepositoryMigrations } from "./migration-runner.ts";
-
-export async function withTenantTransaction<T>(
-  client: SqlClient,
-  clinicId: string,
-  work: (client: SqlClient) => Promise<T>,
-): Promise<T> {
-  if (!clinicId.trim()) throw new Error("CLINIC_ID_REQUIRED");
-  await client.query("BEGIN");
-  try {
-    await client.query("SELECT set_config('app.clinic_id', $1, true)", [clinicId]);
-    const result = await work(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  }
-}
+import { createNodePgPool } from "./node-pg-pool.ts";
 
 export async function migrateDatabase(databaseUrl = process.env.DATABASE_URL): Promise<string[]> {
   if (!databaseUrl) throw new Error("DATABASE_URL_REQUIRED");
-  const { Client } = await import("pg");
-  const client = new Client({ connectionString: databaseUrl });
+  const pool = createNodePgPool(databaseUrl);
+  let client;
   try {
-    await client.connect();
+    client = await pool.connect();
     return await applyMigrations(client, await loadRepositoryMigrations());
   } finally {
-    await client.end().catch(() => undefined);
+    client?.release();
+    await pool.close().catch(() => undefined);
   }
 }
 

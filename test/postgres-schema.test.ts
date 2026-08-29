@@ -8,7 +8,7 @@ import {
   loadRepositoryMigrations,
   MigrationError,
 } from "../src/persistence/migration-runner.ts";
-import { withTenantTransaction } from "../src/persistence/node-pg-client.ts";
+import { withTenantTransaction } from "../src/persistence/tenant-transaction.ts";
 
 const migrations = await loadRepositoryMigrations();
 const migrationSql = await readFile(
@@ -412,14 +412,23 @@ test("migration SQL contains no hard-coded clinic, credentials, extension, or ne
 
 test("tenant adapter sets exact transaction-local clinic context", async () => {
   const calls: Array<{ sql: string; params?: readonly unknown[] }> = [];
-  const client = {
-    async query(sql: string, params?: readonly unknown[]) {
-      calls.push({ sql, params });
-      return { rows: [] };
+  let releases = 0;
+  const pool = {
+    async connect() {
+      return {
+        async query(sql: string, params?: readonly unknown[]) {
+          calls.push({ sql, params });
+          return { rows: [] };
+        },
+        release() {
+          releases += 1;
+        },
+      };
     },
   };
-  const result = await withTenantTransaction(client, " clinic-verbatim ", async () => "done");
+  const result = await withTenantTransaction(pool, " clinic-verbatim ", async () => "done");
   assert.equal(result, "done");
+  assert.equal(releases, 1);
   assert.deepEqual(calls, [
     { sql: "BEGIN", params: undefined },
     {

@@ -28,3 +28,7 @@ uses in-memory synthetic data only and is not a production application.
 `DATABASE_URL`. PostgreSQL schema semantics are tested with PGlite in the restricted
 development executor. Real PostgreSQL server integration, application-role RLS
 enforcement, backup and restore remain required before production or clinic use.
+
+The tenant-scoped capture repository persists only Artifact + EvidenceFactCard through
+the same SQL-semantic harness. The preview still uses synthetic in-memory state; preview
+persistence parity and durable Workflow/Expectation/Decision operations are not complete.
