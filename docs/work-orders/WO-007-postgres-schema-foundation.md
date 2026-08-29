@@ -1,6 +1,6 @@
 # WO-007 — PostgreSQL Schema Foundation
 
-**Status:** APPROVED FOR BUILD  
+**Status:** ARCHITECTURE ACCEPTED
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -223,3 +223,14 @@ The Builder must:
 5. commit with message `feat(persistence): add PostgreSQL schema foundation`;
 6. report SHA, test count, migration tests, dependency tree and deviations;
 7. not push until Architecture Review is complete.
+
+## 13. Architecture acceptance
+
+Accepted on 2026-08-29 through `c1ef8c3`.
+
+- `npm ci`, 110 tests, the domain demo and runtime-profile demo pass.
+- Missing `DATABASE_URL` fails with only `DATABASE_URL_REQUIRED` and exit code 1.
+- The review tightened patient-anchor case handling, decision/evidence coherence and FactCard lineage at the database boundary.
+- The worktree was clean at acceptance and no remote push was attempted.
+
+The honest boundary in section 9 remains open: a real PostgreSQL server, application-role RLS and backup/restore are not yet accepted for production or clinic use.
