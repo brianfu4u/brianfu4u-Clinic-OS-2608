@@ -1,6 +1,6 @@
 # WO-012 — Persisted S2 Verification Ledger
 
-**Status:** READY FOR BUILD
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -146,3 +146,17 @@ npm run runtime:demo
 ## 10. Builder handoff
 
 The Builder must read the Constitution and WO-004 plus WO-007 through WO-012, implement only this slice, run all acceptance commands, commit as `feat(persistence): add S2 verification ledger`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 11. Architecture acceptance
+
+Accepted on 2026-08-29 through `01e6f77` after independent review.
+
+- 188/188 tests and both demos pass.
+- The existing pure `verifyS2` remains the only verdict engine; persistence adds no competing rules.
+- Each record is bound to the current immutable Expectation transition and `S2_V1` verifier version.
+- Only source-time-visible linked evidence enters the verdict; identity, kind and time conflicts remain diagnosable.
+- Exact replay is idempotent, terminal Workflows cannot create a new verdict, and backdated evidence cannot rewrite an old record.
+- Verification rows are append-only, tenant-scoped and constrained against malformed `VERIFIED`/`CONFLICT` shapes.
+- Constitution and migrations `0001` through `0003` remain unchanged; no dependency was added.
+
+Persisted manager decisions and Workflow closure, scheduling, real PostgreSQL application-role RLS/concurrency, backup and restore remain later acceptance gates.
