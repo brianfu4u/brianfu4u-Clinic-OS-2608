@@ -10,7 +10,7 @@ employee report -> Artifact -> EvidenceFactCard -> Workflow -> Expectation -> ma
 manager decision -> immutable ledger -> authoritative Workflow transition
 ```
 
-Requirements: Node.js 24 or newer. No package installation is required.
+Requirements: Node.js 24 or newer.
 
 ```bash
 npm test
@@ -21,3 +21,10 @@ npm run preview
 Open `http://127.0.0.1:3000/employee` for the employee preview or
 `http://127.0.0.1:3000/manager` for the manager preview. The implementation
 uses in-memory synthetic data only and is not a production application.
+
+## PostgreSQL acceptance boundary
+
+`npm run db:migrate` applies checksum-guarded migrations to an explicitly supplied
+`DATABASE_URL`. PostgreSQL schema semantics are tested with PGlite in the restricted
+development executor. Real PostgreSQL server integration, application-role RLS
+enforcement, backup and restore remain required before production or clinic use.

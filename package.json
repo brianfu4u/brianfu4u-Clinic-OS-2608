@@ -10,6 +10,13 @@
     "test": "node --test test/*.test.ts",
     "demo": "node src/domain/golden-path.ts",
     "runtime:demo": "node src/runtime/runtime-demo.ts",
-    "preview": "node src/preview/server.ts"
+    "preview": "node src/preview/server.ts",
+    "db:migrate": "node src/persistence/node-pg-client.ts"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8"
   }
 }

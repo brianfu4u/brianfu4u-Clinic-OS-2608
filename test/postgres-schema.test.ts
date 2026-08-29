@@ -1,0 +1,389 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import test from "node:test";
+import { PGlite } from "@electric-sql/pglite";
+import {
+  applyMigrations,
+  loadRepositoryMigrations,
+  MigrationError,
+} from "../src/persistence/migration-runner.ts";
+import { withTenantTransaction } from "../src/persistence/node-pg-client.ts";
+
+const migrations = await loadRepositoryMigrations();
+const migrationSql = await readFile(
+  new URL("../src/persistence/migrations/0001_trusted_core.sql", import.meta.url),
+  "utf8",
+);
+
+async function migratedDb(): Promise<PGlite> {
+  const db = new PGlite();
+  await applyMigrations(db, migrations);
+  return db;
+}
+
+async function rejectQuery(db: PGlite, sql: string, params: unknown[] = []): Promise<void> {
+  await assert.rejects(db.query(sql, params));
+}
+
+async function seedArtifact(db: PGlite, clinicId = "clinic-a", id = "artifact-a"): Promise<void> {
+  await db.query(
+    `INSERT INTO artifact (
+      clinic_id, id, kind, occurred_at, occurred_at_source, source_employee_id,
+      identity_anchor, payload, created_at
+    ) VALUES ($1, $2, 'REGISTRATION', '2026-08-29T09:00:00Z', 'source',
+      'employee-a', ' PAT-001 ', '{"source":"scan"}', '2026-08-29T09:00:01Z')`,
+    [clinicId, id],
+  );
+}
+
+async function seedWorkflow(db: PGlite, clinicId = "clinic-a", id = "workflow-a"): Promise<void> {
+  await db.query(
+    `INSERT INTO workflow (
+      clinic_id, id, subject_type, identity_anchor, workflow_family, status, created_at, updated_at
+    ) VALUES ($1, $2, 'patient', ' PAT-001 ', 'EYE_EXAM', 'OPEN',
+      '2026-08-29T09:00:01Z', '2026-08-29T09:00:01Z')`,
+    [clinicId, id],
+  );
+}
+
+async function seedExpectation(
+  db: PGlite,
+  clinicId = "clinic-a",
+  id = "expectation-a",
+  workflowId = "workflow-a",
+): Promise<void> {
+  await db.query(
+    `INSERT INTO expectation (
+      clinic_id, id, workflow_id, trigger_kind, consequence_kind, triggered_at,
+      due_at, state, satisfied_by_artifact_id, evaluated_at
+    ) VALUES ($1, $2, $3, 'REGISTRATION', 'EXAM_REPORT', '2026-08-29T09:00:00Z',
+      '2026-08-29T09:15:00Z', 'OPEN', NULL, '2026-08-29T09:05:00Z')`,
+    [clinicId, id, workflowId],
+  );
+}
+
+test("fresh migration creates the required tables", async () => {
+  const db = await migratedDb();
+  try {
+    const result = await db.query<{ tablename: string }>(
+      "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+    );
+    assert.deepEqual(
+      result.rows.map(({ tablename }) => tablename),
+      [
+        "artifact",
+        "evidence_fact_card",
+        "expectation",
+        "manager_decision",
+        "schema_migration",
+        "workflow",
+        "workflow_artifact_link",
+      ],
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("identical migration rerun is a no-op", async () => {
+  const db = new PGlite();
+  try {
+    assert.deepEqual(await applyMigrations(db, migrations), ["0001_trusted_core"]);
+    assert.deepEqual(await applyMigrations(db, migrations), []);
+    const ledger = await db.query("SELECT id FROM schema_migration");
+    assert.equal(ledger.rows.length, 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test("changed checksum for an applied migration fails closed", async () => {
+  const db = new PGlite();
+  try {
+    await applyMigrations(db, [{ id: "0001_test", sql: "CREATE TABLE checksum_a (id text)" }]);
+    await assert.rejects(
+      applyMigrations(db, [{ id: "0001_test", sql: "CREATE TABLE checksum_b (id text)" }]),
+      (error: unknown) => error instanceof MigrationError && error.code === "MIGRATION_CHECKSUM_MISMATCH",
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("failed migration records no ledger row", async () => {
+  const db = new PGlite();
+  try {
+    await applyMigrations(db, [{ id: "0001_test", sql: "CREATE TABLE migration_ok (id text)" }]);
+    await assert.rejects(applyMigrations(db, [{ id: "0002_bad", sql: "NOT VALID SQL" }]));
+    const result = await db.query<{ id: string }>("SELECT id FROM schema_migration ORDER BY id");
+    assert.deepEqual(result.rows.map(({ id }) => id), ["0001_test"]);
+  } finally {
+    await db.close();
+  }
+});
+
+test("unknown and duplicate migration IDs are rejected before SQL", async () => {
+  const db = new PGlite();
+  try {
+    await assert.rejects(
+      applyMigrations(db, [{ id: "bad", sql: "CREATE TABLE should_not_exist (id text)" }]),
+      (error: unknown) => error instanceof MigrationError && error.code === "UNKNOWN_MIGRATION_ID",
+    );
+    await assert.rejects(
+      applyMigrations(db, [
+        { id: "0001_same", sql: "SELECT 1" },
+        { id: "0001_same", sql: "SELECT 2" },
+      ]),
+      (error: unknown) => error instanceof MigrationError && error.code === "DUPLICATE_MIGRATION_ID",
+    );
+    const tables = await db.query("SELECT 1 FROM pg_tables WHERE tablename = 'should_not_exist'");
+    assert.equal(tables.rows.length, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test("artifact preserves exact identity anchor and JSON payload", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    const result = await db.query<{ identity_anchor: string; payload: unknown }>(
+      "SELECT identity_anchor, payload FROM artifact WHERE clinic_id = 'clinic-a' AND id = 'artifact-a'",
+    );
+    assert.equal(result.rows[0].identity_anchor, " PAT-001 ");
+    assert.deepEqual(result.rows[0].payload, { source: "scan" });
+  } finally {
+    await db.close();
+  }
+});
+
+test("artifact rejects UPDATE and DELETE", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await rejectQuery(db, "UPDATE artifact SET kind = 'OTHER'");
+    await rejectQuery(db, "DELETE FROM artifact");
+  } finally {
+    await db.close();
+  }
+});
+
+test("artifact occurred-at provenance combinations are constrained", async () => {
+  const db = await migratedDb();
+  try {
+    const base = `INSERT INTO artifact (
+      clinic_id, id, kind, occurred_at, occurred_at_source, source_employee_id,
+      identity_anchor, payload, created_at
+    ) VALUES ('clinic-a', $1, 'REGISTRATION', $2, $3, 'employee-a', NULL, '{}', NOW())`;
+    await db.query(base, ["valid-null", null, "unknown"]);
+    await db.query(base, ["valid-time", "2026-08-29T09:00:00Z", "source"]);
+    await rejectQuery(db, base, ["bad-null", null, "source"]);
+    await rejectQuery(db, base, ["bad-time", "2026-08-29T09:00:00Z", "unknown"]);
+  } finally {
+    await db.close();
+  }
+});
+
+test("FactCard cross-tenant Artifact FK fails", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db, "clinic-a", "artifact-a");
+    await rejectQuery(
+      db,
+      `INSERT INTO evidence_fact_card (
+        clinic_id, id, artifact_id, subject_type, identity_anchor, workflow_family,
+        occurred_at, fields, missing_fields, confidence, parser_version, lineage_artifact_ids
+      ) VALUES ('clinic-b', 'fact-b', 'artifact-a', 'patient', ' PAT-001 ', 'EYE_EXAM',
+        NOW(), '{}', '{}', 0.9, 'parser-1', '{artifact-a}')`,
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("patient Workflow anchor cannot be null or blank", async () => {
+  const db = await migratedDb();
+  try {
+    const insert = `INSERT INTO workflow (
+      clinic_id, id, subject_type, identity_anchor, workflow_family, status, created_at, updated_at
+    ) VALUES ('clinic-a', $1, 'patient', $2, 'EYE_EXAM', 'OPEN', NOW(), NOW())`;
+    await rejectQuery(db, insert, ["null-anchor", null]);
+    await rejectQuery(db, insert, ["blank-anchor", ""]);
+    await rejectQuery(db, insert, ["space-anchor", "   "]);
+  } finally {
+    await db.close();
+  }
+});
+
+test("link duplicate and cross-tenant foreign keys fail", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    const insert = `INSERT INTO workflow_artifact_link (
+      clinic_id, id, workflow_id, artifact_id, attached_at, decision_source, reasoning_chain
+    ) VALUES ($1, $2, $3, $4, NOW(), 'DETERMINISTIC', '{exact_identity}')`;
+    await db.query(insert, ["clinic-a", "link-a", "workflow-a", "artifact-a"]);
+    await rejectQuery(db, insert, ["clinic-a", "link-b", "workflow-a", "artifact-a"]);
+    await rejectQuery(db, insert, ["clinic-b", "link-c", "workflow-a", "artifact-a"]);
+  } finally {
+    await db.close();
+  }
+});
+
+test("link rejects UPDATE and DELETE", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    await db.query(`INSERT INTO workflow_artifact_link (
+      clinic_id, id, workflow_id, artifact_id, attached_at, decision_source, reasoning_chain
+    ) VALUES ('clinic-a', 'link-a', 'workflow-a', 'artifact-a', NOW(), 'DETERMINISTIC', '{exact_identity}')`);
+    await rejectQuery(db, "UPDATE workflow_artifact_link SET attached_at = NOW()");
+    await rejectQuery(db, "DELETE FROM workflow_artifact_link");
+  } finally {
+    await db.close();
+  }
+});
+
+test("expectation rejects invalid time and satisfying-evidence combinations", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    const insert = `INSERT INTO expectation (
+      clinic_id, id, workflow_id, trigger_kind, consequence_kind, triggered_at,
+      due_at, state, satisfied_by_artifact_id, evaluated_at
+    ) VALUES ('clinic-a', $1, 'workflow-a', 'REGISTRATION', 'EXAM_REPORT',
+      $2, $3, $4, $5, NOW())`;
+    await rejectQuery(db, insert, ["bad-time", "2026-08-29T09:15:00Z", "2026-08-29T09:00:00Z", "OPEN", null]);
+    await rejectQuery(db, insert, ["met-null", "2026-08-29T09:00:00Z", "2026-08-29T09:15:00Z", "MET", null]);
+    await rejectQuery(db, insert, ["open-filled", "2026-08-29T09:00:00Z", "2026-08-29T09:15:00Z", "OPEN", "artifact-a"]);
+  } finally {
+    await db.close();
+  }
+});
+
+test("manager decision rejects invalid actor, action, reason, and verification state", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    await seedExpectation(db);
+    const insert = `INSERT INTO manager_decision (
+      clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
+      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+    ) VALUES ('clinic-a', $1, 'workflow-a', 'expectation-a', $2, $3, NULL,
+      'manager-a', $4, NOW(), '{artifact-a}', $5, '{}')`;
+    await rejectQuery(db, insert, ["bad-role", "KEEP_OPEN", null, "EMPLOYEE", "PENDING"]);
+    await rejectQuery(db, insert, ["bad-action", "AUTO_CLOSE", null, "MANAGER", "PENDING"]);
+    await rejectQuery(db, insert, ["bad-reason", "VOID", "FREE_TEXT", "MANAGER", "PENDING"]);
+    await rejectQuery(db, insert, ["bad-verification", "KEEP_OPEN", null, "MANAGER", "GREEN"]);
+    await rejectQuery(
+      db,
+      `INSERT INTO manager_decision (
+        clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
+        actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+      ) VALUES ('clinic-a', 'bad-verification-reason', 'workflow-a', 'expectation-a',
+        'KEEP_OPEN', NULL, NULL, 'manager-a', 'MANAGER', NOW(), '{artifact-a}',
+        'PENDING', '{MODEL_SAYS_SO}')`,
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("manager decision rejects UPDATE and DELETE", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    await seedExpectation(db);
+    await db.query(`INSERT INTO manager_decision (
+      clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
+      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+    ) VALUES ('clinic-a', 'decision-a', 'workflow-a', 'expectation-a', 'KEEP_OPEN', NULL,
+      NULL, 'manager-a', 'MANAGER', NOW(), '{artifact-a}', 'PENDING', '{CHAIN_OPEN}')`);
+    await rejectQuery(db, "UPDATE manager_decision SET note = 'changed'");
+    await rejectQuery(db, "DELETE FROM manager_decision");
+  } finally {
+    await db.close();
+  }
+});
+
+test("every business table enables and forces RLS with USING and WITH CHECK", async () => {
+  const db = await migratedDb();
+  try {
+    const tables = [
+      "artifact",
+      "evidence_fact_card",
+      "workflow",
+      "workflow_artifact_link",
+      "expectation",
+      "manager_decision",
+    ];
+    const flags = await db.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class
+       WHERE relname = ANY($1) ORDER BY relname`,
+      [tables],
+    );
+    assert.equal(flags.rows.length, tables.length);
+    assert.ok(flags.rows.every(({ relrowsecurity, relforcerowsecurity }) => relrowsecurity && relforcerowsecurity));
+    const policies = await db.query<{ tablename: string; qual: string; with_check: string }>(
+      `SELECT tablename, qual, with_check FROM pg_policies
+       WHERE tablename = ANY($1) ORDER BY tablename`,
+      [tables],
+    );
+    assert.equal(policies.rows.length, tables.length);
+    for (const policy of policies.rows) {
+      assert.match(policy.qual, /current_setting\('app\.clinic_id'/);
+      assert.match(policy.with_check, /current_setting\('app\.clinic_id'/);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test("migration SQL contains no hard-coded clinic, credentials, extension, or network function", () => {
+  assert.doesNotMatch(migrationSql, /demo-clinic|password\s*=|create\s+extension|dblink|http_get|lo_import/i);
+  assert.doesNotMatch(migrationSql, /https?:\/\//i);
+});
+
+test("tenant adapter sets exact transaction-local clinic context", async () => {
+  const calls: Array<{ sql: string; params?: readonly unknown[] }> = [];
+  const client = {
+    async query(sql: string, params?: readonly unknown[]) {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  };
+  const result = await withTenantTransaction(client, " clinic-verbatim ", async () => "done");
+  assert.equal(result, "done");
+  assert.deepEqual(calls, [
+    { sql: "BEGIN", params: undefined },
+    {
+      sql: "SELECT set_config('app.clinic_id', $1, true)",
+      params: [" clinic-verbatim "],
+    },
+    { sql: "COMMIT", params: undefined },
+  ]);
+});
+
+test("db:migrate without DATABASE_URL fails safely before connection", async () => {
+  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    const child = spawn(process.execPath, ["src/persistence/node-pg-client.ts"], {
+      cwd: new URL("..", import.meta.url),
+      env: { ...process.env, DATABASE_URL: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => stdout += chunk);
+    child.stderr.on("data", (chunk) => stderr += chunk);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.notEqual(result.code, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "DATABASE_URL_REQUIRED");
+});
