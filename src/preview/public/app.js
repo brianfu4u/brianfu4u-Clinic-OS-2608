@@ -4,27 +4,30 @@ const strings = {
     newTopic: "新しいトピック", state: "勤務状態", onDuty: "勤務中", onBreak: "休憩中", offDuty: "退勤",
     conversation: "会話", work: "業務更新として記録", send: "送信", topicTitle: "トピック名",
     message: "メッセージ", kind: "種類", anchor: "合成ID（DEMO-）", family: "ワークフロー",
-    occurredAt: "発生日時", synthetic: "実データを入力しないでください。この画面は合成データ専用です。",
+    occurredAt: "発生日時", synthetic: "認証なしのローカル非本番画面です。実データを入力しないでください。",
     all: "すべて", review: "要確認", open: "進行中", complete: "完了", refresh: "更新",
     noItems: "表示するワークフローはありません。", needsReview: "要確認", quiet: "確認不要",
+    action: "店長アクション", reason: "理由コード", note: "任意メモ", decide: "決定を記録", latest: "最新決定",
   },
   zh: {
     product: "Clinic OS · 合成数据预览", employee: "员工端", manager: "店长端",
     newTopic: "新主题", state: "工作状态", onDuty: "在岗", onBreak: "休息", offDuty: "下班",
     conversation: "对话", work: "记录为工作更新", send: "发送", topicTitle: "主题名称",
     message: "消息", kind: "类型", anchor: "合成编号（DEMO-）", family: "工作流",
-    occurredAt: "发生时间", synthetic: "请勿输入真实数据。本页面仅供合成数据预览。",
+    occurredAt: "发生时间", synthetic: "这是未经认证的本地非生产预览。请勿输入真实数据。",
     all: "全部", review: "需复核", open: "进行中", complete: "完成", refresh: "刷新",
     noItems: "暂无工作流。", needsReview: "需要复核", quiet: "无需复核",
+    action: "店长操作", reason: "原因代码", note: "可选备注", decide: "记录决定", latest: "最近决定",
   },
   en: {
     product: "Clinic OS · Synthetic preview", employee: "Employee", manager: "Manager",
     newTopic: "New topic", state: "Work status", onDuty: "On duty", onBreak: "On break", offDuty: "Off duty",
     conversation: "Conversation", work: "Record as work update", send: "Send", topicTitle: "Topic title",
     message: "Message", kind: "Kind", anchor: "Synthetic ID (DEMO-)", family: "Workflow",
-    occurredAt: "Occurred at", synthetic: "Do not enter real data. This preview accepts synthetic data only.",
+    occurredAt: "Occurred at", synthetic: "Unauthenticated local non-production preview. Do not enter real data.",
     all: "All", review: "Needs review", open: "Open", complete: "Complete", refresh: "Refresh",
     noItems: "No workflows to display.", needsReview: "Needs review", quiet: "No review needed",
+    action: "Manager action", reason: "Reason code", note: "Optional note", decide: "Record decision", latest: "Latest decision",
   },
 };
 
@@ -162,7 +165,7 @@ function renderManager() {
   const visible = managerItems.filter((item) => managerFilter === "all" ||
     (managerFilter === "review" && item.needsReview) ||
     (managerFilter === "open" && item.expectationState === "OPEN") ||
-    (managerFilter === "complete" && item.expectationState === "MET"));
+    (managerFilter === "complete" && (item.workflowStatus !== "OPEN" || item.expectationState === "MET")));
   app.innerHTML = `<main class="main"><div class="topbar"><div><h1>${t("manager")}</h1><a href="/employee">${t("employee")}</a></div>${languageButtons()}</div>
     <p class="notice">${t("synthetic")}</p><div class="filters">
       ${[["all", "all"], ["review", "review"], ["open", "open"], ["complete", "complete"]].map(([value, key]) => `<button type="button" data-filter="${value}" aria-pressed="${managerFilter === value}">${t(key)}</button>`).join("")}
@@ -171,13 +174,46 @@ function renderManager() {
       <h2>${escapeHtml(item.identityAnchor)} · ${escapeHtml(item.workflowFamily)}</h2>
       <p><strong>${escapeHtml(item.expectationState)}</strong> · ${item.needsReview ? t("needsReview") : t("quiet")}</p>
       <p class="muted">Workflow: ${escapeHtml(item.workflowId)}<br>Evidence: ${item.evidenceArtifactIds.map(escapeHtml).join(", ") || "—"}<br>Reasons: ${item.reasonCodes.map(escapeHtml).join(", ") || "—"}</p>
+      ${item.latestDecision ? `<p>${t("latest")}: ${escapeHtml(item.latestDecision.action)}${item.latestDecision.reasonCode ? ` · ${escapeHtml(item.latestDecision.reasonCode)}` : ""}</p>` : ""}
+      ${decisionForm(item)}
     </article>`).join("") || `<p class="empty">${t("noItems")}</p>`}</section></main>`;
   document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
     managerFilter = button.dataset.filter;
     renderManager();
   }));
   document.querySelector("#refresh").addEventListener("click", loadManager);
+  document.querySelectorAll("[data-decision-form]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    try {
+      await api("/api/manager/decisions", { method: "POST", body: JSON.stringify({
+        workflowId: form.dataset.workflowId,
+        action: data.get("action"),
+        reasonCode: data.get("reasonCode") || null,
+        note: data.get("note") || null,
+      }) });
+      await loadManager();
+    } catch (error) {
+      form.querySelector('[role="alert"]').textContent = error.message;
+    }
+  }));
   bindLanguage();
+}
+
+function decisionForm(item) {
+  if (item.workflowStatus !== "OPEN") return "";
+  const actions = item.expectationState === "MET"
+    ? ["CLOSE_STANDARD", "VOID"]
+    : item.expectationState === "UNMET"
+      ? ["CLOSE_EXCEPTION", "KEEP_OPEN", "VOID"]
+      : ["KEEP_OPEN", "VOID"];
+  const reasons = ["LEGITIMATE_DEVIATION", "MISSING_EXTERNAL_RECORD", "DUPLICATE_WORKFLOW", "PATIENT_CANCELLED", "NEEDS_MORE_EVIDENCE"];
+  return `<form class="decision-form" data-decision-form data-workflow-id="${escapeHtml(item.workflowId)}">
+    <label>${t("action")}<select name="action">${actions.map((action) => `<option>${action}</option>`).join("")}</select></label>
+    <label>${t("reason")}<select name="reasonCode"><option value="">—</option>${reasons.map((reason) => `<option>${reason}</option>`).join("")}</select></label>
+    <label>${t("note")}<input name="note" maxlength="500"></label>
+    <button class="primary" type="submit">${t("decide")}</button><p role="alert"></p>
+  </form>`;
 }
 
 function escapeHtml(value) {

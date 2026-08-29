@@ -2,10 +2,12 @@
 
 Clinic OS turns clinic artifacts into traceable workflows and manager closure views.
 
-This repository contains the WO-001 in-memory domain tracer and the WO-002 local preview shell:
+This repository contains the WO-001 in-memory domain tracer, the WO-002 local preview shell,
+and the WO-003 append-only human decision ledger:
 
 ```text
 employee report -> Artifact -> EvidenceFactCard -> Workflow -> Expectation -> manager view
+manager decision -> immutable ledger -> authoritative Workflow transition
 ```
 
 Requirements: Node.js 24 or newer. No package installation is required.

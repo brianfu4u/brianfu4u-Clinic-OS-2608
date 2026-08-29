@@ -281,3 +281,127 @@ test("synthetic anchor boundary rejects non-DEMO identities", async () => {
     assert.deepEqual(store.debugCounts(), { artifacts: 0, workflows: 0, expectations: 0 });
   });
 });
+
+test("manager API performs standard close and returns private-text-free history", async () => {
+  await withServer(async (baseUrl) => {
+    const topicId = await topic(baseUrl);
+    await json(baseUrl, "/api/employee/messages", {
+      method: "POST",
+      body: JSON.stringify({ topicId, text: "ordinary conversation sentinel" }),
+    });
+    await setOnDuty(baseUrl);
+    const registration = await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST", body: JSON.stringify(update(topicId)),
+    });
+    await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST",
+      body: JSON.stringify(update(topicId, {
+        kind: "EXAM_REPORT",
+        occurredAt: REPORT_AT,
+        text: "synthetic report",
+      })),
+    });
+
+    const closed = await json(baseUrl, "/api/manager/decisions", {
+      method: "POST",
+      body: JSON.stringify({
+        workflowId: registration.body.workflowId,
+        action: "CLOSE_STANDARD",
+        reasonCode: null,
+        note: " reviewed ",
+      }),
+    });
+    assert.equal(closed.response.status, 201);
+    assert.equal(closed.body.decision.actorId, "demo-manager");
+    assert.equal(closed.body.decision.actorRole, "MANAGER");
+    assert.equal(closed.body.decision.note, "reviewed");
+    assert.equal(closed.body.managerItem.workflowStatus, "CLOSED");
+    assert.equal(closed.body.managerItem.expectationState, "MET");
+    assert.equal(closed.body.managerItem.needsReview, false);
+    assert.equal(closed.body.managerItem.latestDecision.action, "CLOSE_STANDARD");
+
+    const history = await json(
+      baseUrl,
+      `/api/manager/decisions?workflowId=${encodeURIComponent(registration.body.workflowId)}`,
+    );
+    assert.equal(history.response.status, 200);
+    assert.equal(history.body.length, 1);
+    assert.doesNotMatch(JSON.stringify(history.body), /ordinary conversation sentinel/);
+    const [projection] = (await json(baseUrl, "/api/manager/closures")).body;
+    assert.equal(projection.workflowStatus, "CLOSED");
+    assert.equal(projection.needsReview, false);
+  });
+});
+
+test("manager POST rejects caller-controlled authority and lineage fields", async () => {
+  await withServer(async (baseUrl) => {
+    const topicId = await topic(baseUrl);
+    await setOnDuty(baseUrl);
+    const registration = await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST", body: JSON.stringify(update(topicId)),
+    });
+    await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST",
+      body: JSON.stringify(update(topicId, { kind: "EXAM_REPORT", occurredAt: REPORT_AT })),
+    });
+
+    const refused = await json(baseUrl, "/api/manager/decisions", {
+      method: "POST",
+      body: JSON.stringify({
+        workflowId: registration.body.workflowId,
+        action: "CLOSE_STANDARD",
+        reasonCode: null,
+        note: null,
+        actorId: "agent",
+        actorRole: "AGENT",
+        clinicId: "other-clinic",
+        decisionId: "caller-decision",
+        evidenceArtifactIds: [],
+        workflowStatus: "CLOSED",
+      }),
+    });
+    assert.equal(refused.response.status, 400);
+    assert.equal(refused.body.error, "FORBIDDEN_MANAGER_FIELDS");
+    const history = await json(
+      baseUrl,
+      `/api/manager/decisions?workflowId=${encodeURIComponent(registration.body.workflowId)}`,
+    );
+    assert.deepEqual(history.body, []);
+    const [projection] = (await json(baseUrl, "/api/manager/closures")).body;
+    assert.equal(projection.workflowStatus, "OPEN");
+  });
+});
+
+test("terminal Workflow cannot serve as registration for a later report", async () => {
+  await withServer(async (baseUrl) => {
+    const topicId = await topic(baseUrl);
+    await setOnDuty(baseUrl);
+    const registration = await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST", body: JSON.stringify(update(topicId)),
+    });
+    await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST",
+      body: JSON.stringify(update(topicId, { kind: "EXAM_REPORT", occurredAt: REPORT_AT })),
+    });
+    await json(baseUrl, "/api/manager/decisions", {
+      method: "POST",
+      body: JSON.stringify({
+        workflowId: registration.body.workflowId,
+        action: "CLOSE_STANDARD",
+        reasonCode: null,
+        note: null,
+      }),
+    });
+
+    const lateReport = await json(baseUrl, "/api/employee/work-updates", {
+      method: "POST",
+      body: JSON.stringify(update(topicId, {
+        kind: "EXAM_REPORT",
+        occurredAt: "2026-08-29T09:12:00.000Z",
+      })),
+    });
+    assert.equal(lateReport.response.status, 400);
+    assert.equal(lateReport.body.error, "UNSUPPORTED_PREVIEW_SEQUENCE");
+    assert.equal((await json(baseUrl, "/api/manager/closures")).body.length, 1);
+  });
+});

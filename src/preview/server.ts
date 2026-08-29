@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { DomainError } from "../domain/errors.ts";
+import type { ManagerDecisionAction } from "../domain/contracts.ts";
 import { PreviewStore, type EmployeeStatus } from "./preview-store.ts";
 
 const PUBLIC_FILES = new Map([
@@ -100,6 +101,22 @@ async function route(
     sendJson(response, 200, store.managerClosures(clock()));
     return;
   }
+  if (method === "POST" && path === "/api/manager/decisions") {
+    const body = await jsonBody(request);
+    rejectUnexpectedKeys(body, ["workflowId", "action", "reasonCode", "note"]);
+    sendJson(response, 201, store.submitManagerDecision({
+      workflowId: asString(body.workflowId),
+      action: asString(body.action) as ManagerDecisionAction,
+      reasonCode: asNullableString(body.reasonCode),
+      note: asNullableString(body.note),
+      now: clock(),
+    }));
+    return;
+  }
+  if (method === "GET" && path === "/api/manager/decisions") {
+    sendJson(response, 200, store.managerDecisionHistory(asString(url.searchParams.get("workflowId"))));
+    return;
+  }
   sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
 }
 
@@ -108,6 +125,21 @@ function asString(value: unknown): string {
     throw new DomainError("INVALID_PREVIEW_INPUT", "Expected a string value.");
   }
   return value;
+}
+
+function asNullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return asString(value);
+}
+
+function rejectUnexpectedKeys(body: Record<string, unknown>, allowed: readonly string[]): void {
+  const unexpected = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    throw new DomainError(
+      "FORBIDDEN_MANAGER_FIELDS",
+      `Manager decision fields are server-controlled: ${unexpected.join(", ")}.`,
+    );
+  }
 }
 
 async function jsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {

@@ -70,6 +70,26 @@ export interface ManagerClosureView {
   reasonCodes: string[];
 }
 
+export type ManagerDecisionAction =
+  | "CLOSE_STANDARD"
+  | "CLOSE_EXCEPTION"
+  | "KEEP_OPEN"
+  | "VOID";
+
+export interface ManagerDecision {
+  id: string;
+  clinicId: string;
+  workflowId: string;
+  expectationId: string;
+  action: ManagerDecisionAction;
+  reasonCode: string | null;
+  note: string | null;
+  actorId: string;
+  actorRole: "MANAGER";
+  decidedAt: IsoTimestamp;
+  evidenceArtifactIds: string[];
+}
+
 export type WorkflowResolution =
   | { kind: "ATTACH_EXISTING"; workflowId: string }
   | { kind: "CREATE_NEW" }

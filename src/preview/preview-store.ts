@@ -2,7 +2,10 @@ import type {
   Artifact,
   EvidenceFactCard,
   Expectation,
+  ManagerDecision,
+  ManagerDecisionAction,
   ManagerClosureView,
+  Workflow,
 } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
 import { evaluateExpectation } from "../domain/expectation.ts";
@@ -32,6 +35,7 @@ export interface PreviewMessage {
 export interface ManagerPreviewItem extends ManagerClosureView {
   identityAnchor: string;
   workflowFamily: string;
+  latestDecision: Pick<ManagerDecision, "action" | "reasonCode" | "decidedAt"> | null;
 }
 
 interface StoredExpectation {
@@ -41,6 +45,7 @@ interface StoredExpectation {
 
 const CLINIC_ID = "demo-clinic";
 const EMPLOYEE_ID = "demo-employee";
+const MANAGER_ID = "demo-manager";
 
 function requireTimestamp(value: string, label: string): string {
   if (!Number.isFinite(Date.parse(value))) {
@@ -147,9 +152,11 @@ export class PreviewStore {
     const now = requireTimestamp(input.now, "Work update receivedAt");
     const text = requireText(input.text, "Work update text");
 
-    const prior = [...this.#expectations.values()].find(
-      ({ identityAnchor: anchor }) => anchor === identityAnchor,
-    );
+    const prior = [...this.#expectations.entries()].find(
+      ([workflowId, { identityAnchor: anchor }]) =>
+        anchor === identityAnchor &&
+        this.#repositories.workflows.getWorkflow(CLINIC_ID, workflowId)?.status === "OPEN",
+    )?.[1];
     if (
       input.kind === "EXAM_REPORT" &&
       (!prior || Date.parse(occurredAt) < Date.parse(prior.expectation.triggeredAt))
@@ -214,26 +221,54 @@ export class PreviewStore {
   managerClosures(now: string): ManagerPreviewItem[] {
     const evaluatedAt = requireTimestamp(now, "Manager projection time");
     return [...this.#expectations.entries()].map(([workflowId, stored]) => {
-      const workflow = this.#repositories.workflows.getWorkflow(CLINIC_ID, workflowId);
-      if (!workflow) {
-        throw new DomainError("WORKFLOW_NOT_FOUND", "Stored preview Workflow is unavailable.");
-      }
-      const links = this.#repositories.workflows.listLinks(CLINIC_ID, workflowId);
-      const artifacts = links
-        .map((link) => this.#repositories.artifacts.get(CLINIC_ID, link.artifactId))
-        .filter((artifact): artifact is Artifact => artifact !== null);
-      const expectation = evaluateExpectation(stored.expectation, artifacts, evaluatedAt);
-      stored.expectation = expectation;
-      return {
-        identityAnchor: stored.identityAnchor,
-        workflowFamily: workflow.workflowFamily,
-        ...projectManagerClosure({
-          workflow,
-          expectation,
-          evidenceArtifactIds: artifacts.map(({ id }) => id),
-        }),
-      };
+      const current = this.#currentWorkflow(workflowId, evaluatedAt);
+      const decisions = this.#repositories.workflows.listManagerDecisions(CLINIC_ID, workflowId);
+      const latest = decisions.at(-1);
+      return this.#managerItem(stored, current.workflow, current.expectation, current.artifacts, latest);
     });
+  }
+
+  submitManagerDecision(input: {
+    workflowId: string;
+    action: ManagerDecisionAction;
+    reasonCode: string | null;
+    note: string | null;
+    now: string;
+  }): { decision: ManagerDecision; managerItem: ManagerPreviewItem } {
+    const now = requireTimestamp(input.now, "Manager decision time");
+    const stored = this.#expectations.get(input.workflowId);
+    if (!stored) throw new DomainError("WORKFLOW_NOT_FOUND", "Preview Workflow was not found.");
+    const current = this.#currentWorkflow(input.workflowId, now);
+    stored.expectation = current.expectation;
+    const result = this.#repositories.workflows.recordManagerDecision({
+      id: this.#id("decision"),
+      clinicId: CLINIC_ID,
+      workflowId: input.workflowId,
+      expectation: current.expectation,
+      action: input.action,
+      reasonCode: input.reasonCode,
+      note: input.note,
+      actorId: MANAGER_ID,
+      actorRole: "MANAGER",
+      decidedAt: now,
+    });
+    return {
+      decision: result.decision,
+      managerItem: this.#managerItem(
+        stored,
+        result.workflow,
+        current.expectation,
+        current.artifacts,
+        result.decision,
+      ),
+    };
+  }
+
+  managerDecisionHistory(workflowId: string): ManagerDecision[] {
+    if (!this.#expectations.has(workflowId)) {
+      throw new DomainError("WORKFLOW_NOT_FOUND", "Preview Workflow was not found.");
+    }
+    return this.#repositories.workflows.listManagerDecisions(CLINIC_ID, workflowId);
   }
 
   debugCounts(): { artifacts: number; workflows: number; expectations: number } {
@@ -248,6 +283,49 @@ export class PreviewStore {
     const topic = this.#topics.get(topicId);
     if (!topic) throw new DomainError("TOPIC_NOT_FOUND", "Preview topic was not found.");
     return topic;
+  }
+
+  #currentWorkflow(workflowId: string, now: string): {
+    workflow: Workflow;
+    expectation: Expectation;
+    artifacts: Artifact[];
+  } {
+    const stored = this.#expectations.get(workflowId);
+    const workflow = this.#repositories.workflows.getWorkflow(CLINIC_ID, workflowId);
+    if (!stored || !workflow) {
+      throw new DomainError("WORKFLOW_NOT_FOUND", "Stored preview Workflow is unavailable.");
+    }
+    const artifacts = this.#repositories.workflows.listLinks(CLINIC_ID, workflowId)
+      .map((link) => this.#repositories.artifacts.get(CLINIC_ID, link.artifactId))
+      .filter((artifact): artifact is Artifact => artifact !== null);
+    const expectation = evaluateExpectation(stored.expectation, artifacts, now);
+    stored.expectation = expectation;
+    return { workflow, expectation, artifacts };
+  }
+
+  #managerItem(
+    stored: StoredExpectation,
+    workflow: Workflow,
+    expectation: Expectation,
+    artifacts: readonly Artifact[],
+    latestDecision?: ManagerDecision,
+  ): ManagerPreviewItem {
+    return {
+      identityAnchor: stored.identityAnchor,
+      workflowFamily: workflow.workflowFamily,
+      latestDecision: latestDecision
+        ? {
+            action: latestDecision.action,
+            reasonCode: latestDecision.reasonCode,
+            decidedAt: latestDecision.decidedAt,
+          }
+        : null,
+      ...projectManagerClosure({
+        workflow,
+        expectation,
+        evidenceArtifactIds: artifacts.map(({ id }) => id),
+      }),
+    };
   }
 
   #addMessage(
