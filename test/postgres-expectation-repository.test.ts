@@ -603,6 +603,394 @@ test("returned transition evidence arrays are detached", async () => {
   }
 });
 
+test("re-evaluation records OPEN, UNMET, late UNMET, and recovery MET history", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new ExpectationRepository(pool);
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+
+    const stillOpen = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T09:06:00.000Z",
+    );
+    assert.equal(stillOpen.expectation.state, "OPEN");
+    assert.equal(stillOpen.transition?.fromState, "OPEN");
+    assert.equal(stillOpen.transition?.toState, "OPEN");
+
+    const unmet = await repository.reevaluateExpectation(actor(), "expectation-a", DUE_AT);
+    assert.equal(unmet.expectation.state, "UNMET");
+    assert.equal(unmet.transition?.fromState, "OPEN");
+    assert.equal(unmet.transition?.toState, "UNMET");
+
+    const stillUnmet = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T09:16:00.000Z",
+    );
+    assert.equal(stillUnmet.transition?.fromState, "UNMET");
+    assert.equal(stillUnmet.transition?.toState, "UNMET");
+
+    await seedArtifact(pool, {
+      id: "report-late-link",
+      kind: "EXAM_REPORT",
+      occurredAt: "2026-08-29T09:10:00.000Z",
+    });
+    await seedLink(
+      pool, "workflow-a", "report-late-link", "2026-08-29T09:17:00.000Z",
+    );
+    const recovered = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T09:18:00.000Z",
+    );
+    assert.equal(recovered.expectation.state, "MET");
+    assert.equal(recovered.expectation.satisfiedByArtifactId, "report-late-link");
+    assert.equal(recovered.transition?.fromState, "UNMET");
+    assert.equal(recovered.transition?.toState, "MET");
+    assert.deepEqual(
+      recovered.transition?.evidenceArtifactIds,
+      ["trigger-a", "report-late-link"],
+    );
+
+    const history = await pool.db.query<{ from_state: string | null; to_state: string }>(
+      `SELECT from_state, to_state FROM expectation_transition
+       WHERE clinic_id = 'clinic-a' AND expectation_id = 'expectation-a'
+       ORDER BY evaluated_at`,
+    );
+    assert.deepEqual(history.rows, [
+      { from_state: null, to_state: "OPEN" },
+      { from_state: "OPEN", to_state: "OPEN" },
+      { from_state: "OPEN", to_state: "UNMET" },
+      { from_state: "UNMET", to_state: "UNMET" },
+      { from_state: "UNMET", to_state: "MET" },
+    ]);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("visible in-window consequence performs OPEN to MET", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    const repository = new ExpectationRepository(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+    await seedArtifact(pool, {
+      id: "report-a",
+      kind: "EXAM_REPORT",
+      occurredAt: "2026-08-29T09:10:00.000Z",
+    });
+    await seedLink(pool, "workflow-a", "report-a", "2026-08-29T09:10:01.000Z");
+    const result = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T09:11:00.000Z",
+    );
+    assert.equal(result.expectation.state, "MET");
+    assert.equal(result.transition?.fromState, "OPEN");
+    assert.equal(result.transition?.satisfiedByArtifactId, "report-a");
+  } finally {
+    await pool.close();
+  }
+});
+
+test("invalidly timed, hidden-link, and near-identity evidence cannot satisfy", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    const repository = new ExpectationRepository(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+    const cases = [
+      ["report-before", "2026-08-29T08:59:59.000Z", "2026-08-29T09:10:00.000Z", " PAT-001 "],
+      ["report-after-due", "2026-08-29T09:15:00.001Z", "2026-08-29T09:16:00.000Z", " PAT-001 "],
+      ["report-future", "2026-08-29T09:30:00.000Z", "2026-08-29T09:10:00.000Z", " PAT-001 "],
+      ["report-hidden-link", "2026-08-29T09:10:00.000Z", "2026-08-29T09:21:00.000Z", " PAT-001 "],
+      ["report-near", "2026-08-29T09:10:00.000Z", "2026-08-29T09:10:00.000Z", "PAT-001"],
+    ] as const;
+    for (const [id, occurredAt, attachedAt, identityAnchor] of cases) {
+      await seedArtifact(pool, { id, kind: "EXAM_REPORT", occurredAt, identityAnchor });
+      await seedLink(pool, "workflow-a", id, attachedAt);
+    }
+    const result = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T09:20:00.000Z",
+    );
+    assert.equal(result.expectation.state, "UNMET");
+    assert.equal(result.expectation.satisfiedByArtifactId, null);
+    assert.deepEqual(result.transition?.evidenceArtifactIds, ["trigger-a"]);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("stale time fails and same-time replay is an idempotent no-op", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    const repository = new ExpectationRepository(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+    const first = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T09:06:00.000Z",
+    );
+    const replay = await repository.reevaluateExpectation(
+      actor(), "expectation-a", "2026-08-29T10:06:00.000+01:00",
+    );
+    assert.equal(replay.transition, null);
+    assert.deepEqual(replay.expectation, first.expectation);
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), "expectation-a", BEFORE_DUE),
+      hasCode("EXPECTATION_EVALUATION_STALE"),
+    );
+    assert.deepEqual(await countRows(pool), { expectations: 1, transitions: 2 });
+  } finally {
+    await pool.close();
+  }
+});
+
+test("MET and VOIDED are automatic terminal states", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new ExpectationRepository(pool);
+  try {
+    await seedWorkflow(pool, workflow("workflow-met"));
+    await seedTrigger(pool, "workflow-met", "trigger-met");
+    await seedArtifact(pool, {
+      id: "report-met", kind: "EXAM_REPORT", occurredAt: "2026-08-29T09:10:00.000Z",
+    });
+    await seedLink(pool, "workflow-met", "report-met", "2026-08-29T09:10:01.000Z");
+    const met = await repository.initializeExpectation(
+      actor(), "workflow-met", spec("expectation-met"), "2026-08-29T09:11:00.000Z",
+    );
+    const metReplay = await repository.reevaluateExpectation(
+      actor(), "expectation-met", "2026-08-29T09:20:00.000Z",
+    );
+    assert.equal(metReplay.transition, null);
+    assert.deepEqual(metReplay.expectation, met.expectation);
+
+    await seedWorkflow(pool, workflow("workflow-void"));
+    await seedTrigger(pool, "workflow-void", "trigger-void");
+    await repository.initializeExpectation(
+      actor(), "workflow-void", spec("expectation-void"), BEFORE_DUE,
+    );
+    await pool.db.query(
+      `UPDATE expectation SET state = 'VOIDED', evaluated_at = $1
+       WHERE clinic_id = 'clinic-a' AND id = 'expectation-void'`,
+      ["2026-08-29T09:07:00.000Z"],
+    );
+    const voided = await repository.reevaluateExpectation(
+      actor(), "expectation-void", "2026-08-29T09:20:00.000Z",
+    );
+    assert.equal(voided.expectation.state, "VOIDED");
+    assert.equal(voided.transition, null);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("missing and cross-clinic Expectation or terminal Workflow fail closed", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new ExpectationRepository(pool);
+  try {
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), "missing", DUE_AT),
+      hasCode("EXPECTATION_NOT_FOUND"),
+    );
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+    await assert.rejects(
+      repository.reevaluateExpectation(actor("clinic-b"), "expectation-a", DUE_AT),
+      hasCode("EXPECTATION_NOT_FOUND"),
+    );
+    await pool.db.query(
+      "UPDATE workflow SET status = 'CLOSED' WHERE clinic_id = 'clinic-a' AND id = 'workflow-a'",
+    );
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), "expectation-a", DUE_AT),
+      hasCode("WORKFLOW_TERMINAL"),
+    );
+  } finally {
+    await pool.close();
+  }
+});
+
+test("missing or non-visible initialization trigger fails closed", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new ExpectationRepository(pool);
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedArtifact(pool, { id: "trigger-a" });
+    await seedLink(pool, "workflow-a", "trigger-a", "2026-08-29T09:30:00.000Z");
+    await withTenantTransaction(pool, "clinic-a", async (client) => {
+      await client.query(
+        `INSERT INTO expectation
+           (id, clinic_id, workflow_id, trigger_kind, consequence_kind, triggered_at,
+            due_at, state, satisfied_by_artifact_id, evaluated_at)
+         VALUES ('expectation-a', 'clinic-a', 'workflow-a', 'REGISTRATION',
+           'EXAM_REPORT', $1, $2, 'OPEN', NULL, $3)`,
+        [TRIGGERED_AT, DUE_AT, BEFORE_DUE],
+      );
+      await client.query(
+        `INSERT INTO expectation_transition
+           (id, clinic_id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
+            trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids)
+         VALUES ('transition:init:clinic-a:expectation-a', 'clinic-a', 'expectation-a',
+           'workflow-a', NULL, 'OPEN', $1, 'trigger-a', NULL, '{trigger-a}')`,
+        [BEFORE_DUE],
+      );
+    });
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), "expectation-a", DUE_AT),
+      hasCode("EXPECTATION_TRIGGER_NOT_FOUND"),
+    );
+
+    await seedWorkflow(pool, workflow("workflow-no-init"));
+    await withTenantTransaction(pool, "clinic-a", async (client) => {
+      await client.query(
+        `INSERT INTO expectation
+           (id, clinic_id, workflow_id, trigger_kind, consequence_kind, triggered_at,
+            due_at, state, satisfied_by_artifact_id, evaluated_at)
+         VALUES ('expectation-no-init', 'clinic-a', 'workflow-no-init', 'REGISTRATION',
+           'EXAM_REPORT', $1, $2, 'OPEN', NULL, $3)`,
+        [TRIGGERED_AT, DUE_AT, BEFORE_DUE],
+      );
+    });
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), "expectation-no-init", DUE_AT),
+      hasCode("EXPECTATION_INITIALIZATION_NOT_FOUND"),
+    );
+  } finally {
+    await pool.close();
+  }
+});
+
+test("invalid re-evaluation inputs fail before acquisition", async () => {
+  const pool = new PGlitePoolShim();
+  const repository = new ExpectationRepository(pool);
+  try {
+    for (const value of ["", "2026-08-29", "2026-08-29T09:15:00", "2026-02-30T09:00:00Z"]) {
+      await assert.rejects(
+        repository.reevaluateExpectation(actor(), "expectation-a", value),
+        hasCode("INVALID_EXPECTATION_TIME"),
+      );
+    }
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), " ", DUE_AT),
+      hasCode("EXPECTATION_ID_REQUIRED"),
+    );
+    assert.equal(pool.acquisitions, 0);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("deterministic transition conflict leaves projection unchanged", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new ExpectationRepository(pool);
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+    const evaluatedAt = "2026-08-29T09:06:00.000Z";
+    await pool.db.query(
+      `INSERT INTO expectation_transition
+         (id, clinic_id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
+          trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids)
+       VALUES ($1, 'clinic-a', 'expectation-a', 'workflow-a', 'OPEN', 'UNMET', $2,
+         'trigger-a', NULL, '{trigger-a}')`,
+      [`transition:eval:clinic-a:expectation-a:${evaluatedAt}`, evaluatedAt],
+    );
+    await assert.rejects(
+      repository.reevaluateExpectation(actor(), "expectation-a", evaluatedAt),
+      hasCode("EXPECTATION_TRANSITION_ID_CONFLICT"),
+    );
+    const projection = await pool.db.query<{ state: string; evaluated_at: Date | string }>(
+      "SELECT state, evaluated_at FROM expectation WHERE clinic_id = 'clinic-a' AND id = 'expectation-a'",
+    );
+    assert.equal(projection.rows[0].state, "OPEN");
+    assert.equal(new Date(projection.rows[0].evaluated_at).toISOString(), BEFORE_DUE);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("re-evaluation transition and projection failures roll back atomically", async () => {
+  for (const failPrefix of ["INSERT INTO expectation_transition", "UPDATE expectation"]) {
+    const pool = new PGlitePoolShim();
+    await pool.migrate();
+    try {
+      await seedWorkflow(pool, workflow());
+      await seedTrigger(pool);
+      await new ExpectationRepository(pool).initializeExpectation(
+        actor(), "workflow-a", spec(), BEFORE_DUE,
+      );
+      const baseConnect = pool.connect.bind(pool);
+      const failingPool: DatabasePool = {
+        async connect() {
+          const connection = await baseConnect();
+          return {
+            query: (text, values) => text.trimStart().startsWith(failPrefix)
+              ? Promise.reject(new Error(`forced ${failPrefix}`))
+              : connection.query(text, values),
+            release: () => connection.release(),
+          };
+        },
+      };
+      await assert.rejects(
+        new ExpectationRepository(failingPool).reevaluateExpectation(
+          actor(), "expectation-a", DUE_AT,
+        ),
+        /forced/,
+      );
+      const projection = await pool.db.query<{ state: string }>(
+        "SELECT state FROM expectation WHERE clinic_id = 'clinic-a' AND id = 'expectation-a'",
+      );
+      assert.equal(projection.rows[0].state, "OPEN");
+      assert.deepEqual(await countRows(pool), { expectations: 1, transitions: 1 });
+    } finally {
+      await pool.close();
+    }
+  }
+});
+
+test("re-evaluation snapshots context and returns detached evidence", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new ExpectationRepository(pool);
+  try {
+    await seedWorkflow(pool, workflow());
+    await seedTrigger(pool);
+    await repository.initializeExpectation(actor(), "workflow-a", spec(), BEFORE_DUE);
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => resume = resolve);
+    const baseConnect = pool.connect.bind(pool);
+    pool.connect = async () => {
+      await gate;
+      return baseConnect();
+    };
+    const context = actor();
+    const pending = repository.reevaluateExpectation(context, "expectation-a", DUE_AT);
+    context.clinicId = "clinic-mutated";
+    resume();
+    const result = await pending;
+    assert.equal(result.expectation.clinicId, "clinic-a");
+    result.transition?.evidenceArtifactIds.push("mutated");
+    const replay = await repository.reevaluateExpectation(actor(), "expectation-a", DUE_AT);
+    assert.equal(replay.transition, null);
+    const stored = await pool.db.query<{ evidence_artifact_ids: string[] }>(
+      `SELECT evidence_artifact_ids FROM expectation_transition
+       WHERE clinic_id = 'clinic-a' AND expectation_id = 'expectation-a' AND from_state = 'OPEN'`,
+    );
+    assert.deepEqual(stored.rows[0].evidence_artifact_ids, ["trigger-a"]);
+  } finally {
+    await pool.close();
+  }
+});
+
 function hasCode(code: string): (error: unknown) => boolean {
   return (error) => error instanceof DomainError && error.code === code;
 }

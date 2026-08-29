@@ -17,6 +17,9 @@ const migrationSql = await readFile(
 ) + await readFile(
   new URL("../src/persistence/migrations/0002_expectation_transition.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0003_expectation_reevaluation.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -95,11 +98,11 @@ test("identical migration rerun is a no-op", async () => {
   try {
     assert.deepEqual(
       await applyMigrations(db, migrations),
-      ["0001_trusted_core", "0002_expectation_transition"],
+      ["0001_trusted_core", "0002_expectation_transition", "0003_expectation_reevaluation"],
     );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 2);
+    assert.equal(ledger.rows.length, 3);
   } finally {
     await db.close();
   }
@@ -296,6 +299,27 @@ test("expectation rejects invalid time and satisfying-evidence combinations", as
     await rejectQuery(db, insert, ["bad-time", "2026-08-29T09:15:00Z", "2026-08-29T09:00:00Z", "OPEN", null]);
     await rejectQuery(db, insert, ["met-null", "2026-08-29T09:00:00Z", "2026-08-29T09:15:00Z", "MET", null]);
     await rejectQuery(db, insert, ["open-filled", "2026-08-29T09:00:00Z", "2026-08-29T09:15:00Z", "OPEN", "artifact-a"]);
+  } finally {
+    await db.close();
+  }
+});
+
+test("expectation transition rejects illegal automatic paths and duplicate evaluation instants", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    await seedExpectation(db);
+    const insert = `INSERT INTO expectation_transition (
+      clinic_id, id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
+      trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids
+    ) VALUES ('clinic-a', $1, 'expectation-a', 'workflow-a', $2, $3, $4,
+      'artifact-a', NULL, '{artifact-a}')`;
+    await db.query(insert, ["open-open", "OPEN", "OPEN", "2026-08-29T09:06:00Z"]);
+    await rejectQuery(db, insert, ["duplicate-time", "OPEN", "UNMET", "2026-08-29T09:06:00Z"]);
+    await rejectQuery(db, insert, ["unmet-open", "UNMET", "OPEN", "2026-08-29T09:07:00Z"]);
+    await rejectQuery(db, insert, ["met-open", "MET", "OPEN", "2026-08-29T09:08:00Z"]);
+    await rejectQuery(db, insert, ["voided-open", "VOIDED", "OPEN", "2026-08-29T09:09:00Z"]);
   } finally {
     await db.close();
   }

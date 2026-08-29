@@ -30,6 +30,11 @@ export interface InitializedExpectation {
   transition: ExpectationTransition;
 }
 
+export interface ReevaluatedExpectation {
+  expectation: Expectation;
+  transition: ExpectationTransition | null;
+}
+
 type WorkflowRow = {
   id: string;
   clinic_id: string;
@@ -204,6 +209,154 @@ export class ExpectationRepository {
       return structuredClone({ expectation: storedExpectation, transition: storedTransition });
     });
   }
+
+  async reevaluateExpectation(
+    context: ActorContext,
+    expectationId: string,
+    evaluatedAt: string,
+  ): Promise<ReevaluatedExpectation> {
+    const captured = structuredClone({ context, expectationId, evaluatedAt });
+    assertActorContext(captured.context);
+    if (typeof captured.expectationId !== "string" || captured.expectationId.trim() === "") {
+      throw new DomainError("EXPECTATION_ID_REQUIRED", "Expectation ID is required.");
+    }
+    const evaluationInstant = parseStrictIsoInstant(captured.evaluatedAt);
+    if (evaluationInstant === null) {
+      throw new DomainError(
+        "INVALID_EXPECTATION_TIME",
+        "Evaluation time requires an explicit valid ISO-8601 timestamp.",
+      );
+    }
+    const canonicalEvaluatedAt = new Date(evaluationInstant).toISOString();
+
+    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) => {
+      const expectation = await findExpectation(
+        client,
+        captured.context.clinicId,
+        captured.expectationId,
+      );
+      if (!expectation) {
+        throw new DomainError(
+          "EXPECTATION_NOT_FOUND",
+          "Expectation is not readable in this clinic.",
+        );
+      }
+
+      const workflow = await findWorkflow(
+        client,
+        captured.context.clinicId,
+        expectation.workflowId,
+      );
+      if (!workflow) {
+        throw new DomainError("WORKFLOW_NOT_FOUND", "Workflow is not readable in this clinic.");
+      }
+      if (workflow.status !== "OPEN") {
+        throw new DomainError("WORKFLOW_TERMINAL", "Expectation re-evaluation requires an open Workflow.");
+      }
+
+      const initialization = await findInitializationTransition(
+        client,
+        captured.context.clinicId,
+        expectation.id,
+      );
+      if (!initialization || initialization.workflowId !== workflow.id) {
+        throw new DomainError(
+          "EXPECTATION_INITIALIZATION_NOT_FOUND",
+          "A unique initialization transition is required for re-evaluation.",
+        );
+      }
+
+      const linked = await findLinkedArtifacts(client, captured.context.clinicId, workflow.id);
+      const visible = linked.filter(({ artifact, attachedAt }) => {
+        const attachedInstant = parseStrictIsoInstant(attachedAt);
+        if (attachedInstant === null) {
+          throw new DomainError("INVALID_LINK_TIME", "Linked evidence has an invalid attachedAt time.");
+        }
+        return attachedInstant <= evaluationInstant &&
+          artifact.identityAnchor === workflow.identityAnchor;
+      });
+      const triggeredInstant = parseStrictIsoInstant(expectation.triggeredAt);
+      const trigger = visible.find(({ artifact }) =>
+        artifact.id === initialization.triggerArtifactId &&
+        artifact.kind === expectation.triggerKind &&
+        artifact.occurredAt !== null &&
+        parseStrictIsoInstant(artifact.occurredAt) === triggeredInstant)?.artifact;
+      if (!trigger) {
+        throw new DomainError(
+          "EXPECTATION_TRIGGER_NOT_FOUND",
+          "The exact visible initialization trigger is required for re-evaluation.",
+        );
+      }
+
+      const currentEvaluationInstant = parseStrictIsoInstant(expectation.evaluatedAt);
+      if (currentEvaluationInstant === null) {
+        throw new DomainError(
+          "INVALID_EXPECTATION_TIME",
+          "Stored Expectation evaluation time is invalid.",
+        );
+      }
+      if (evaluationInstant < currentEvaluationInstant) {
+        throw new DomainError(
+          "EXPECTATION_EVALUATION_STALE",
+          "Expectation evaluation time cannot move backwards.",
+        );
+      }
+      if (evaluationInstant === currentEvaluationInstant ||
+          expectation.state === "MET" || expectation.state === "VOIDED") {
+        return structuredClone({ expectation, transition: null });
+      }
+
+      const evaluated = evaluateExpectation(
+        expectation,
+        visible.map(({ artifact }) => artifact),
+        canonicalEvaluatedAt,
+      );
+      const transition = makeReevaluationTransition(evaluated, expectation.state, trigger.id);
+      const existingById = await findTransition(
+        client,
+        captured.context.clinicId,
+        transition.id,
+      );
+      const existingAtInstant = await findTransitionAtEvaluation(
+        client,
+        captured.context.clinicId,
+        expectation.id,
+        canonicalEvaluatedAt,
+      );
+      if (existingById || existingAtInstant) {
+        throw new DomainError(
+          "EXPECTATION_TRANSITION_ID_CONFLICT",
+          "Evaluation transition identity has different or inconsistent content.",
+        );
+      }
+
+      await insertTransition(client, transition);
+      const storedTransition = await findTransition(
+        client,
+        captured.context.clinicId,
+        transition.id,
+      );
+      if (!storedTransition || !transitionEqual(storedTransition, transition)) {
+        throw new DomainError(
+          "EXPECTATION_TRANSITION_ID_CONFLICT",
+          "Evaluation transition ID has different content.",
+        );
+      }
+
+      const storedExpectation = await updateExpectation(
+        client,
+        evaluated,
+        expectation.evaluatedAt,
+      );
+      if (!storedExpectation || !expectationEqual(storedExpectation, evaluated)) {
+        throw new DomainError(
+          "EXPECTATION_PROJECTION_CONFLICT",
+          "Expectation projection could not be updated atomically.",
+        );
+      }
+      return structuredClone({ expectation: storedExpectation, transition: storedTransition });
+    });
+  }
 }
 
 function validateInput(
@@ -318,6 +471,37 @@ async function findTransition(
   return result.rows[0] ? transitionFromRow(result.rows[0]) : null;
 }
 
+async function findInitializationTransition(
+  client: TenantQueryClient,
+  clinicId: string,
+  expectationId: string,
+): Promise<ExpectationTransition | null> {
+  const result = await client.query<TransitionRow>(
+    `SELECT id, clinic_id, expectation_id, workflow_id, from_state, to_state,
+            evaluated_at, trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids
+       FROM expectation_transition
+      WHERE clinic_id = $1 AND expectation_id = $2 AND from_state IS NULL`,
+    [clinicId, expectationId],
+  );
+  return result.rows[0] ? transitionFromRow(result.rows[0]) : null;
+}
+
+async function findTransitionAtEvaluation(
+  client: TenantQueryClient,
+  clinicId: string,
+  expectationId: string,
+  evaluatedAt: string,
+): Promise<ExpectationTransition | null> {
+  const result = await client.query<TransitionRow>(
+    `SELECT id, clinic_id, expectation_id, workflow_id, from_state, to_state,
+            evaluated_at, trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids
+       FROM expectation_transition
+      WHERE clinic_id = $1 AND expectation_id = $2 AND evaluated_at = $3`,
+    [clinicId, expectationId, evaluatedAt],
+  );
+  return result.rows[0] ? transitionFromRow(result.rows[0]) : null;
+}
+
 async function insertExpectation(client: TenantQueryClient, expectation: Expectation): Promise<void> {
   await client.query(
     `INSERT INTO expectation
@@ -365,6 +549,29 @@ async function insertTransition(
   );
 }
 
+async function updateExpectation(
+  client: TenantQueryClient,
+  expectation: Expectation,
+  previousEvaluatedAt: string,
+): Promise<Expectation | null> {
+  const result = await client.query<ExpectationRow>(
+    `UPDATE expectation
+        SET state = $1, satisfied_by_artifact_id = $2, evaluated_at = $3
+      WHERE clinic_id = $4 AND id = $5 AND evaluated_at = $6
+      RETURNING id, clinic_id, workflow_id, trigger_kind, consequence_kind, triggered_at,
+                due_at, state, satisfied_by_artifact_id, evaluated_at`,
+    [
+      expectation.state,
+      expectation.satisfiedByArtifactId,
+      expectation.evaluatedAt,
+      expectation.clinicId,
+      expectation.id,
+      previousEvaluatedAt,
+    ],
+  );
+  return result.rows[0] ? expectationFromRow(result.rows[0]) : null;
+}
+
 function makeTransition(expectation: Expectation, triggerArtifactId: string): ExpectationTransition {
   const evidenceArtifactIds = expectation.satisfiedByArtifactId === null ||
       expectation.satisfiedByArtifactId === triggerArtifactId
@@ -381,6 +588,19 @@ function makeTransition(expectation: Expectation, triggerArtifactId: string): Ex
     triggerArtifactId,
     satisfiedByArtifactId: expectation.satisfiedByArtifactId,
     evidenceArtifactIds,
+  };
+}
+
+function makeReevaluationTransition(
+  expectation: Expectation,
+  fromState: Expectation["state"],
+  triggerArtifactId: string,
+): ExpectationTransition {
+  const transition = makeTransition(expectation, triggerArtifactId);
+  return {
+    ...transition,
+    id: `transition:eval:${expectation.clinicId}:${expectation.id}:${expectation.evaluatedAt}`,
+    fromState,
   };
 }
 

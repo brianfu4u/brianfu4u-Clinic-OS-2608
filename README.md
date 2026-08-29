@@ -42,4 +42,7 @@ and append-only Link writes only; Expectation and later closure persistence rema
 Exact candidate rows and their source Artifact are locked during attach. Real PostgreSQL
 close/attach and multi-worker interleavings remain deployment acceptance cases.
 Expectation initialization now persists the current projection with one append-only,
-tenant-scoped initialization transition. Later evidence re-evaluation remains out of scope.
+tenant-scoped initialization transition. Explicit re-evaluation appends each automatic
+`OPEN`/`UNMET`/`MET` transition atomically with the current projection, including preserved
+`UNMET -> MET` recovery history. Scheduling, VOID and manager-decision persistence remain
+separate work.
