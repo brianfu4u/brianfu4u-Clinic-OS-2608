@@ -7,7 +7,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test test/golden-path.test.ts",
-    "demo": "node src/domain/golden-path.ts"
+    "test": "node --test test/*.test.ts",
+    "demo": "node src/domain/golden-path.ts",
+    "preview": "node src/preview/server.ts"
   }
 }
