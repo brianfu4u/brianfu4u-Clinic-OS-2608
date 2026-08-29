@@ -23,6 +23,9 @@ const migrationSql = await readFile(
 ) + await readFile(
   new URL("../src/persistence/migrations/0004_s2_verification.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0005_manager_decision_saga.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -72,6 +75,21 @@ async function seedExpectation(
   );
 }
 
+async function seedOpenVerification(db: PGlite): Promise<void> {
+  await db.query(`INSERT INTO expectation_transition (
+    clinic_id, id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
+    trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids
+  ) VALUES ('clinic-a', 'transition-open', 'expectation-a', 'workflow-a', NULL, 'OPEN',
+    '2026-08-29T09:05:00Z', 'artifact-a', NULL, '{artifact-a}')`);
+  await db.query(`INSERT INTO s2_verification (
+    clinic_id, id, workflow_id, expectation_id, source_transition_id, verifier_version,
+    status, reason_codes, trigger_artifact_id, consequence_artifact_id,
+    evidence_artifact_ids, evaluated_at
+  ) VALUES ('clinic-a', 'verification-open', 'workflow-a', 'expectation-a',
+    'transition-open', 'S2_V1', 'PENDING', '{CHAIN_OPEN}', 'artifact-a', NULL,
+    '{artifact-a}', '2026-08-29T09:05:00Z')`);
+}
+
 test("fresh migration creates the required tables", async () => {
   const db = await migratedDb();
   try {
@@ -107,11 +125,12 @@ test("identical migration rerun is a no-op", async () => {
         "0002_expectation_transition",
         "0003_expectation_reevaluation",
         "0004_s2_verification",
+        "0005_manager_decision_saga",
       ],
     );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 4);
+    assert.equal(ledger.rows.length, 5);
   } finally {
     await db.close();
   }
@@ -340,11 +359,15 @@ test("manager decision rejects invalid actor, action, reason, and verification s
     await seedArtifact(db);
     await seedWorkflow(db);
     await seedExpectation(db);
+    await seedOpenVerification(db);
     const insert = `INSERT INTO manager_decision (
       clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
-      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes,
+      verification_id, verification_source_transition_id, expectation_state,
+      verification_evaluated_at
     ) VALUES ('clinic-a', $1, 'workflow-a', 'expectation-a', $2, $3, NULL,
-      'manager-a', $4, NOW(), '{artifact-a}', $5, '{}')`;
+      'manager-a', $4, '2026-08-29T09:06:00Z', '{artifact-a}', $5, '{}',
+      'verification-open', 'transition-open', 'OPEN', '2026-08-29T09:05:00Z')`;
     await rejectQuery(db, insert, ["bad-role", "KEEP_OPEN", null, "EMPLOYEE", "PENDING"]);
     await rejectQuery(db, insert, ["bad-action", "AUTO_CLOSE", null, "MANAGER", "PENDING"]);
     await rejectQuery(db, insert, ["bad-reason", "VOID", "FREE_TEXT", "MANAGER", "PENDING"]);
@@ -353,10 +376,13 @@ test("manager decision rejects invalid actor, action, reason, and verification s
       db,
       `INSERT INTO manager_decision (
         clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
-        actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+        actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes,
+        verification_id, verification_source_transition_id, expectation_state,
+        verification_evaluated_at
       ) VALUES ('clinic-a', 'bad-verification-reason', 'workflow-a', 'expectation-a',
-        'KEEP_OPEN', NULL, NULL, 'manager-a', 'MANAGER', NOW(), '{artifact-a}',
-        'PENDING', '{MODEL_SAYS_SO}')`,
+        'KEEP_OPEN', NULL, NULL, 'manager-a', 'MANAGER', '2026-08-29T09:06:00Z',
+        '{artifact-a}', 'PENDING', '{MODEL_SAYS_SO}', 'verification-open',
+        'transition-open', 'OPEN', '2026-08-29T09:05:00Z')`,
     );
   } finally {
     await db.close();
@@ -369,11 +395,16 @@ test("manager decision rejects UPDATE and DELETE", async () => {
     await seedArtifact(db);
     await seedWorkflow(db);
     await seedExpectation(db);
+    await seedOpenVerification(db);
     await db.query(`INSERT INTO manager_decision (
       clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
-      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes,
+      verification_id, verification_source_transition_id, expectation_state,
+      verification_evaluated_at
     ) VALUES ('clinic-a', 'decision-a', 'workflow-a', 'expectation-a', 'KEEP_OPEN', NULL,
-      NULL, 'manager-a', 'MANAGER', NOW(), '{artifact-a}', 'PENDING', '{CHAIN_OPEN}')`);
+      NULL, 'manager-a', 'MANAGER', '2026-08-29T09:06:00Z', '{artifact-a}',
+      'PENDING', '{CHAIN_OPEN}', 'verification-open', 'transition-open', 'OPEN',
+      '2026-08-29T09:05:00Z')`);
     await rejectQuery(db, "UPDATE manager_decision SET note = 'changed'");
     await rejectQuery(db, "DELETE FROM manager_decision");
   } finally {
@@ -387,11 +418,15 @@ test("manager decision enforces closure, evidence, and verification coherence", 
     await seedArtifact(db);
     await seedWorkflow(db);
     await seedExpectation(db);
+    await seedOpenVerification(db);
     const insert = `INSERT INTO manager_decision (
       clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
-      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes,
+      verification_id, verification_source_transition_id, expectation_state,
+      verification_evaluated_at
     ) VALUES ('clinic-a', $1, 'workflow-a', 'expectation-a', $2, $3, NULL,
-      'manager-a', 'MANAGER', NOW(), $4, $5, $6)`;
+      'manager-a', 'MANAGER', '2026-08-29T09:06:00Z', $4, $5, $6,
+      'verification-open', 'transition-open', 'OPEN', '2026-08-29T09:05:00Z')`;
     await rejectQuery(db, insert, [
       "standard-pending", "CLOSE_STANDARD", null, ["artifact-a"], "PENDING", ["CHAIN_OPEN"],
     ]);
@@ -405,8 +440,40 @@ test("manager decision enforces closure, evidence, and verification coherence", 
       "null-evidence", "KEEP_OPEN", null, ["artifact-a", null], "PENDING", ["CHAIN_OPEN"],
     ]);
     await rejectQuery(db, insert, [
+      "duplicate-evidence", "KEEP_OPEN", null,
+      ["artifact-a", "artifact-a"], "PENDING", ["CHAIN_OPEN"],
+    ]);
+    await rejectQuery(db, insert, [
       "null-verification-reason", "KEEP_OPEN", null, ["artifact-a"], "PENDING", [null],
     ]);
+    await rejectQuery(db, insert, [
+      "fabricated-verification-reason", "KEEP_OPEN", null,
+      ["artifact-a"], "PENDING", ["CHAIN_UNMET"],
+    ]);
+    await rejectQuery(
+      db,
+      `INSERT INTO manager_decision (
+        clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
+        actor_role, decided_at, evidence_artifact_ids, verification_status,
+        verification_reason_codes, verification_id, verification_source_transition_id,
+        expectation_state, verification_evaluated_at
+      ) VALUES ('clinic-a', 'stale-expectation-state', 'workflow-a', 'expectation-a',
+        'KEEP_OPEN', 'NEEDS_MORE_EVIDENCE', NULL, 'manager-a', 'MANAGER',
+        '2026-08-29T09:06:00Z', '{artifact-a}', 'PENDING', '{CHAIN_OPEN}',
+        'verification-open', 'transition-open', 'UNMET', '2026-08-29T09:05:00Z')`,
+    );
+    await rejectQuery(
+      db,
+      `INSERT INTO manager_decision (
+        clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
+        actor_role, decided_at, evidence_artifact_ids, verification_status,
+        verification_reason_codes, verification_id, verification_source_transition_id,
+        expectation_state, verification_evaluated_at
+      ) VALUES ('clinic-a', 'decision-before-verification', 'workflow-a', 'expectation-a',
+        'KEEP_OPEN', NULL, NULL, 'manager-a', 'MANAGER', '2026-08-29T09:04:59Z',
+        '{artifact-a}', 'PENDING', '{CHAIN_OPEN}', 'verification-open', 'transition-open',
+        'OPEN', '2026-08-29T09:05:00Z')`,
+    );
   } finally {
     await db.close();
   }

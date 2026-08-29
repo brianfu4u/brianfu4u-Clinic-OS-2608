@@ -48,4 +48,7 @@ tenant-scoped initialization transition. Explicit re-evaluation appends each aut
 separate work.
 The current Expectation projection can now be passed through the existing deterministic
 S2 engine and recorded in an immutable, tenant-scoped verification ledger. Persisted
-manager decisions and Workflow closure remain separate work.
+manager decisions now bind that exact S2 snapshot to an immutable human record and update
+Workflow/Expectation projections atomically, including append-only human VOID history.
+Preview/API persistence parity, reopen/correction flows, real PostgreSQL application-role
+RLS/concurrency proof, backup and restore remain separate acceptance gates.

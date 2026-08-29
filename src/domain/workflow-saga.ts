@@ -49,6 +49,32 @@ export const MANAGER_REASON_CODES = [
   "NEEDS_MORE_EVIDENCE",
 ] as const;
 
+export function assertManagerActionAllowed(
+  action: ManagerDecisionAction,
+  state: Expectation["state"],
+  verificationStatus: VerificationResult["status"],
+  reasonCode: string | null,
+): void {
+  if (action === "CLOSE_STANDARD" && (state !== "MET" || verificationStatus !== "VERIFIED")) {
+    throw new DomainError("DECISION_NOT_ALLOWED", "Standard close requires MET and VERIFIED.");
+  }
+  if (action === "CLOSE_EXCEPTION" && (state !== "UNMET" || reasonCode === null)) {
+    throw new DomainError(
+      "DECISION_NOT_ALLOWED",
+      "Exception close requires UNMET and a controlled reason.",
+    );
+  }
+  if (action === "KEEP_OPEN" && !["OPEN", "UNMET"].includes(state)) {
+    throw new DomainError("DECISION_NOT_ALLOWED", "Keep open requires OPEN or UNMET.");
+  }
+  if (action === "KEEP_OPEN" && state === "UNMET" && reasonCode === null) {
+    throw new DomainError("DECISION_NOT_ALLOWED", "Keeping UNMET open requires a reason.");
+  }
+  if (action === "VOID" && reasonCode === null) {
+    throw new DomainError("DECISION_NOT_ALLOWED", "Void requires a controlled reason.");
+  }
+}
+
 const VERIFICATION_REASON_CODES = [
   "TRIGGER_NOT_FOUND",
   "CONSEQUENCE_NOT_FOUND",
@@ -273,7 +299,7 @@ export class WorkflowSaga {
       throw new DomainError("WORKFLOW_TERMINAL", "Closed and voided Workflows are terminal.");
     }
 
-    this.#assertDecisionAllowed(
+    assertManagerActionAllowed(
       input.action,
       input.expectation.state,
       input.verification.status,
@@ -359,35 +385,6 @@ export class WorkflowSaga {
       decisionSource: "DETERMINISTIC",
       reasoningChain: ["exact_clinic", "exact_subject", "exact_identity", "exact_workflow_family"],
     };
-  }
-
-  #assertDecisionAllowed(
-    action: ManagerDecisionAction,
-    state: Expectation["state"],
-    verificationStatus: VerificationResult["status"],
-    reasonCode: string | null,
-  ): void {
-    if (action === "CLOSE_STANDARD" && (state !== "MET" || verificationStatus !== "VERIFIED")) {
-      throw new DomainError(
-        "DECISION_NOT_ALLOWED",
-        "Standard close requires MET and VERIFIED.",
-      );
-    }
-    if (action === "CLOSE_EXCEPTION" && (state !== "UNMET" || reasonCode === null)) {
-      throw new DomainError(
-        "DECISION_NOT_ALLOWED",
-        "Exception close requires UNMET and a controlled reason.",
-      );
-    }
-    if (action === "KEEP_OPEN" && !["OPEN", "UNMET"].includes(state)) {
-      throw new DomainError("DECISION_NOT_ALLOWED", "Keep open requires OPEN or UNMET.");
-    }
-    if (action === "KEEP_OPEN" && state === "UNMET" && reasonCode === null) {
-      throw new DomainError("DECISION_NOT_ALLOWED", "Keeping UNMET open requires a reason.");
-    }
-    if (action === "VOID" && reasonCode === null) {
-      throw new DomainError("DECISION_NOT_ALLOWED", "Void requires a controlled reason.");
-    }
   }
 
   #linkKey(workflowId: string, artifactId: string): string {
