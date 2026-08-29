@@ -132,6 +132,27 @@ test("missing clinical anchor is blocked before resolution", () => {
   assert.equal(repositories.workflows.listOpenWorkflows("clinic-1").length, 0);
 });
 
+test("parser cannot replace the source Artifact identity anchor", () => {
+  const source = artifact({ identityAnchor: "P-001" });
+  const repositories = createInMemoryRepositories();
+
+  assert.throws(
+    () => runGoldenPath(
+      {
+        ...input(source),
+        parser: (item) => factCard(item, { identityAnchor: "P-999" }),
+      },
+      repositories,
+    ),
+    (error) => error instanceof DomainError && error.code === "IDENTITY_ANCHOR_MISMATCH",
+  );
+  assert.equal(repositories.workflows.listOpenWorkflows("clinic-1").length, 0);
+  assert.deepEqual(
+    repositories.workflows.listLinks("clinic-1", "wf:clinic-1:artifact-1"),
+    [],
+  );
+});
+
 test("near-miss identity P-001 never matches P-OO1", () => {
   const repositories = createInMemoryRepositories({
     workflowSaga: {
@@ -181,6 +202,49 @@ test("consequence occurring exactly at dueAt is MET", () => {
 
   assert.equal(result.state, "MET");
   assert.equal(result.satisfiedByArtifactId, "report");
+});
+
+test("consequence before triggeredAt cannot satisfy an Expectation", () => {
+  const oldReport = artifact({
+    id: "old-report",
+    kind: "EXAM_REPORT",
+    occurredAt: "2026-08-29T08:59:59.999Z",
+  });
+  const result = evaluateExpectation(expectation(), [oldReport], DUE);
+
+  assert.equal(result.state, "UNMET");
+  assert.equal(result.satisfiedByArtifactId, null);
+});
+
+test("invalid or reversed Expectation time fails closed", () => {
+  assert.throws(
+    () => evaluateExpectation(expectation({ triggeredAt: "not-a-time" }), [], NOW),
+    (error) => error instanceof DomainError && error.code === "INVALID_EXPECTATION_TIME",
+  );
+  assert.throws(
+    () => evaluateExpectation(
+      expectation({
+        triggeredAt: "2026-08-29T09:16:00.000Z",
+        dueAt: "2026-08-29T09:15:00.000Z",
+      }),
+      [],
+      NOW,
+    ),
+    (error) => error instanceof DomainError && error.code === "INVALID_EXPECTATION_TIME",
+  );
+});
+
+test("invalid consequence occurredAt fails closed", () => {
+  const invalidReport = artifact({
+    id: "invalid-report",
+    kind: "EXAM_REPORT",
+    occurredAt: "not-a-time",
+  });
+
+  assert.throws(
+    () => evaluateExpectation(expectation(), [invalidReport], NOW),
+    (error) => error instanceof DomainError && error.code === "INVALID_ARTIFACT_TIME",
+  );
 });
 
 test("no consequence at dueAt is UNMET", () => {

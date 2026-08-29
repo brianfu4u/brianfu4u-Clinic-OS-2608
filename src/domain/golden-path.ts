@@ -7,7 +7,7 @@ import type {
 } from "./contracts.ts";
 import { DomainError } from "./errors.ts";
 import { evaluateExpectation } from "./expectation.ts";
-import { requireClinicalIdentity } from "./identity-gate.ts";
+import { assertFactCardIdentitySource } from "./identity-gate.ts";
 import { projectManagerClosure } from "./manager-projection.ts";
 import { resolveWorkflow } from "./workflow-resolver.ts";
 import { WorkflowSaga, type WorkflowSagaOptions } from "./workflow-saga.ts";
@@ -117,7 +117,7 @@ export function runGoldenPath(
 ): GoldenPathResult {
   const artifact = repositories.artifacts.save(input.artifact);
   const factCard = validateFactCard(input.parser(artifact), artifact);
-  requireClinicalIdentity(factCard);
+  assertFactCardIdentitySource(factCard, artifact);
 
   const resolution = resolveWorkflow(
     factCard,

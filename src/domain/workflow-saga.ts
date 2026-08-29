@@ -61,7 +61,7 @@ export class WorkflowSaga {
     if (!workflow || workflow.clinicId !== artifact.clinicId) {
       throw new DomainError("WORKFLOW_NOT_FOUND", "Workflow is not readable in this clinic.");
     }
-    assertAttachIdentity(factCard, workflow);
+    assertAttachIdentity(factCard, workflow, artifact);
     const existing = this.#links.get(this.#linkKey(workflowId, artifact.id));
     if (existing) {
       return { workflow: structuredClone(workflow), link: structuredClone(existing) };
@@ -88,7 +88,7 @@ export class WorkflowSaga {
       createdAt: attachedAt,
       updatedAt: attachedAt,
     };
-    assertAttachIdentity(factCard, workflow);
+    assertAttachIdentity(factCard, workflow, artifact);
     if (this.#workflows.has(workflow.id)) {
       throw new DomainError("WORKFLOW_ID_CONFLICT", "Generated Workflow ID already exists.");
     }
