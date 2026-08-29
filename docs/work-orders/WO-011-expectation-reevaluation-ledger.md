@@ -1,6 +1,6 @@
 # WO-011 — Expectation Re-evaluation Ledger
 
-**Status:** ACCEPTED  
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
