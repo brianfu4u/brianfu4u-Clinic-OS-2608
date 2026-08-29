@@ -22,6 +22,8 @@ export class DisabledInferenceProvider implements InferenceProvider {
 export class InferenceGateway {
   readonly #manifest: Readonly<RuntimeManifest>;
   readonly #provider: InferenceProvider;
+  readonly #expectedProviderKind: InferenceProvider["kind"];
+  readonly #expectedModelId: string;
   readonly #receipts: InferenceCallReceipt[] = [];
 
   constructor(manifest: RuntimeManifest, provider: InferenceProvider) {
@@ -63,6 +65,8 @@ export class InferenceGateway {
       throw new DomainError("INVALID_INFERENCE_PROVIDER", "Provider model ID is required.");
     }
     this.#provider = provider;
+    this.#expectedProviderKind = provider.kind;
+    this.#expectedModelId = provider.modelId;
   }
 
   async infer(context: ActorContext, request: InferenceRequest): Promise<InferenceResponse> {
@@ -74,11 +78,27 @@ export class InferenceGateway {
         "Inference request is outside the ActorContext clinic.",
       );
     }
+    this.#assertProviderIdentity();
     const response = await this.#provider.infer(
       structuredClone(context),
       structuredClone(request),
     );
-    validateResponse(response, request, this.#provider);
+    this.#assertProviderIdentity();
+    validateResponse(
+      response,
+      request,
+      this.#expectedProviderKind,
+      this.#expectedModelId,
+    );
+    let clonedResponse: InferenceResponse;
+    try {
+      clonedResponse = structuredClone(response);
+    } catch {
+      throw new DomainError(
+        "INVALID_INFERENCE_RESPONSE",
+        "Inference response must be safely cloneable before receipt commit.",
+      );
+    }
     this.#receipts.push(Object.freeze({
       requestId: request.requestId,
       clinicId: request.clinicId,
@@ -86,12 +106,24 @@ export class InferenceGateway {
       capability: request.capability,
       completedAt: response.completedAt,
     }));
-    return structuredClone(response);
+    return clonedResponse;
   }
 
   listReceipts(context: ActorContext): InferenceCallReceipt[] {
     assertActorContext(context);
     return structuredClone(this.#receipts.filter(({ clinicId }) => clinicId === context.clinicId));
+  }
+
+  #assertProviderIdentity(): void {
+    if (
+      this.#provider.kind !== this.#expectedProviderKind ||
+      this.#provider.modelId !== this.#expectedModelId
+    ) {
+      throw new DomainError(
+        "INFERENCE_PROVIDER_IDENTITY_CHANGED",
+        "Inference provider identity changed after gateway construction.",
+      );
+    }
   }
 }
 
@@ -115,14 +147,15 @@ function validateRequest(request: InferenceRequest): void {
 function validateResponse(
   response: InferenceResponse,
   request: InferenceRequest,
-  provider: InferenceProvider,
+  expectedProviderKind: InferenceProvider["kind"],
+  expectedModelId: string,
 ): void {
   if (
     !response ||
     response.requestId !== request.requestId ||
     response.schemaVersion !== request.schemaVersion ||
-    response.providerKind !== provider.kind ||
-    response.modelId !== provider.modelId ||
+    response.providerKind !== expectedProviderKind ||
+    response.modelId !== expectedModelId ||
     !Number.isFinite(Date.parse(response.completedAt)) ||
     !Object.hasOwn(response, "output")
   ) {

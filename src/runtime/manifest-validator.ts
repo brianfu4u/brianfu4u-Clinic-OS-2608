@@ -17,6 +17,15 @@ const BACKUPS = [
   "CLOUD_MANAGED_BACKUP",
   "LOCAL_PLUS_ENCRYPTED_REMOTE_BACKUP",
 ] as const;
+const MANIFEST_FIELDS = new Set([
+  "profile",
+  "databaseProvider",
+  "fileProvider",
+  "inferenceProvider",
+  "backupProvider",
+  "externalInferenceAuthorized",
+  "manifestVersion",
+]);
 
 function isOneOf<T extends string>(value: unknown, choices: readonly T[]): value is T {
   return typeof value === "string" && choices.includes(value as T);
@@ -28,6 +37,7 @@ export function validateRuntimeManifest(value: unknown): Readonly<RuntimeManifes
   }
   const input = value as Record<string, unknown>;
   if (
+    Object.keys(input).some((field) => !MANIFEST_FIELDS.has(field)) ||
     !isOneOf<DeploymentProfile>(input.profile, PROFILES) ||
     !isOneOf<DatabaseProviderKind>(input.databaseProvider, DATABASES) ||
     !isOneOf<FileProviderKind>(input.fileProvider, FILES) ||

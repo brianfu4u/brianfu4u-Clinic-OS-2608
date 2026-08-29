@@ -157,11 +157,39 @@ test("Cloud rejects every local-only provider kind", () => {
 test("invalid provider enum or missing manifest field fails closed", () => {
   const missing = { ...strict() } as Record<string, unknown>;
   delete missing.fileProvider;
-  for (const manifest of [missing, { ...strict(), inferenceProvider: "AUTO" }]) {
+  for (const manifest of [
+    missing,
+    { ...strict(), inferenceProvider: "AUTO" },
+    { ...strict(), fallbackProvider: "PRIVATE_CLOUD_MODEL" },
+    { ...strict(), egress: true },
+  ]) {
     assert.throws(
       () => validateRuntimeManifest(manifest),
       (error) => error instanceof DomainError && error.code === "INVALID_RUNTIME_MANIFEST",
     );
+  }
+});
+
+test("provider identity mutation is refused before invocation", async () => {
+  for (const mutation of [
+    (provider: DeterministicInferenceFixture) => {
+      (provider as { kind: InferenceProviderKind }).kind = "PRIVATE_CLOUD_MODEL";
+    },
+    (provider: DeterministicInferenceFixture) => {
+      (provider as { modelId: string }).modelId = "mutated-model";
+    },
+  ]) {
+    const provider = new DeterministicInferenceFixture("LOCAL_MODEL");
+    const gateway = new InferenceGateway(strict(), provider);
+    mutation(provider);
+    await assert.rejects(
+      gateway.infer(CONTEXT, REQUEST),
+      (error) =>
+        error instanceof DomainError &&
+        error.code === "INFERENCE_PROVIDER_IDENTITY_CHANGED",
+    );
+    assert.equal(provider.invocations, 0);
+    assert.deepEqual(gateway.listReceipts(CONTEXT), []);
   }
 });
 
@@ -218,6 +246,23 @@ test("malformed provider response identity and schema fail closed", async () => 
     const gateway = new InferenceGateway(
       strict(),
       new DeterministicInferenceFixture("LOCAL_MODEL", mutate),
+    );
+    await assert.rejects(
+      gateway.infer(CONTEXT, REQUEST),
+      (error) => error instanceof DomainError && error.code === "INVALID_INFERENCE_RESPONSE",
+    );
+    assert.deepEqual(gateway.listReceipts(CONTEXT), []);
+  }
+});
+
+test("uncloneable provider output fails atomically without receipt", async () => {
+  for (const output of [() => "not cloneable", Symbol("not cloneable")]) {
+    const gateway = new InferenceGateway(
+      strict(),
+      new DeterministicInferenceFixture("LOCAL_MODEL", (response) => ({
+        ...response,
+        output,
+      })),
     );
     await assert.rejects(
       gateway.infer(CONTEXT, REQUEST),
