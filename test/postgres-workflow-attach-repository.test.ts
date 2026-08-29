@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import type { ActorContext, Artifact, EvidenceFactCard, Workflow } from "../src/domain/contracts.ts";
@@ -220,12 +221,51 @@ test("invalid caller inputs fail before acquisition", async () => {
   try {
     await assert.rejects(repository.attachCapture(actor(), "", "fact-a", ATTACHED_AT), hasCode("ARTIFACT_ID_REQUIRED"));
     await assert.rejects(repository.attachCapture(actor(), "artifact-a", "", ATTACHED_AT), hasCode("FACT_CARD_ID_REQUIRED"));
-    await assert.rejects(repository.attachCapture(actor(), "artifact-a", "fact-a", "not-a-time"), hasCode("INVALID_ATTACHED_AT"));
+    for (const invalidTime of [
+      "not-a-time",
+      "2026-08-29",
+      "2026-08-29T09:05:00",
+      "2026-02-30T09:05:00Z",
+      "2026-08-29T24:05:00Z",
+      "2026-08-29T09:05:00+15:00",
+      "2026-08-29T09:05:00+14:01",
+    ]) {
+      await assert.rejects(
+        repository.attachCapture(actor(), "artifact-a", "fact-a", invalidTime),
+        hasCode("INVALID_ATTACHED_AT"),
+      );
+    }
     await assert.rejects(
       repository.attachCapture({ ...actor(), role: "SYSTEM" as never }, "artifact-a", "fact-a", ATTACHED_AT),
       hasCode("INVALID_ACTOR_CONTEXT"),
     );
     assert.equal(pool.acquisitions, 0);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("candidate query locks exact Workflow rows before resolution", async () => {
+  const source = await readFile(
+    new URL("../src/persistence/workflow-attach-repository.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /FROM workflow[\s\S]+status = 'OPEN'[\s\S]+ORDER BY id\s+FOR UPDATE/,
+  );
+});
+
+test("explicit ISO timestamp with offset is accepted", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  try {
+    await seedCapture(pool);
+    const result = await new WorkflowAttachRepository(pool).attachCapture(
+      actor(), "artifact-a", "fact-a", "2026-08-29T18:05:00+09:00",
+    );
+    assert.equal(result.resolution.kind, "CREATE_NEW");
+    assert.equal(Date.parse(result.link.attachedAt), Date.parse(ATTACHED_AT));
   } finally {
     await pool.close();
   }
@@ -371,6 +411,23 @@ test("same replay is idempotent and conflicting attachedAt fails without duplica
       repository.attachCapture(actor(), "artifact-a", "fact-a", "2026-08-29T09:06:00.000Z"),
       hasCode("LINK_ID_CONFLICT"),
     );
+    assert.deepEqual(await countRows(pool), { workflows: 1, links: 1 });
+  } finally {
+    await pool.close();
+  }
+});
+
+test("preexisting exact deterministic-ID Workflow has stable first and replay resolution", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  const repository = new WorkflowAttachRepository(pool);
+  try {
+    await seedCapture(pool);
+    await seedWorkflow(pool, workflow({ id: "wf:clinic-a:artifact-a" }));
+    const first = await repository.attachCapture(actor(), "artifact-a", "fact-a", ATTACHED_AT);
+    const replay = await repository.attachCapture(actor(), "artifact-a", "fact-a", ATTACHED_AT);
+    assert.deepEqual(first.resolution, { kind: "CREATE_NEW" });
+    assert.deepEqual(replay, first);
     assert.deepEqual(await countRows(pool), { workflows: 1, links: 1 });
   } finally {
     await pool.close();

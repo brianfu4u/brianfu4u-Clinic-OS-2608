@@ -130,7 +130,9 @@ export class WorkflowAttachRepository {
       }
 
       const resolution: "ATTACH_EXISTING" | "CREATE_NEW" =
-        candidates.length === 1 ? "ATTACH_EXISTING" : "CREATE_NEW";
+        candidates.length === 0 || candidates[0].id === workflowIdFor(artifact)
+          ? "CREATE_NEW"
+          : "ATTACH_EXISTING";
       let workflow = candidates[0] ?? makeWorkflow(
         captured.context.clinicId,
         artifact,
@@ -179,9 +181,38 @@ function validateInput(
   if (typeof factCardId !== "string" || factCardId.trim() === "") {
     throw new DomainError("FACT_CARD_ID_REQUIRED", "FactCard ID is required.");
   }
-  if (typeof attachedAt !== "string" || attachedAt.trim() === "" || !Number.isFinite(Date.parse(attachedAt))) {
+  if (typeof attachedAt !== "string" || !isExplicitIsoTimestamp(attachedAt)) {
     throw new DomainError("INVALID_ATTACHED_AT", "An explicit valid attachedAt timestamp is required.");
   }
+}
+
+function isExplicitIsoTimestamp(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone, , offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (
+    month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) ||
+    hour > 23 || minute > 59 || second > 59
+  ) return false;
+  if (zone !== "Z") {
+    const offsetHour = Number(offsetHourText);
+    const offsetMinute = Number(offsetMinuteText);
+    if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
+      return false;
+    }
+  }
+  return Number.isFinite(Date.parse(value));
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
 function validateCapture(artifact: Artifact, factCard: EvidenceFactCard): void {
@@ -257,7 +288,8 @@ async function findExactCandidates(
        FROM workflow
       WHERE clinic_id = $1 AND subject_type = $2 AND identity_anchor IS NOT DISTINCT FROM $3
         AND workflow_family = $4 AND status = 'OPEN'
-      ORDER BY id`,
+      ORDER BY id
+      FOR UPDATE`,
     [clinicId, factCard.subjectType, factCard.identityAnchor, factCard.workflowFamily],
   );
   return result.rows.map(workflowFromRow);

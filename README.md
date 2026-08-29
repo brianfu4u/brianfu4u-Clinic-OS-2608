@@ -39,3 +39,5 @@ Atomic `ON CONFLICT` capture writes remove the application SELECT-to-INSERT race
 PostgreSQL concurrent replay remains part of the existing real-server acceptance gate.
 Authoritative Workflow attach persistence now covers exact match, deterministic creation
 and append-only Link writes only; Expectation and later closure persistence remain separate.
+Exact candidate rows and their source Artifact are locked during attach. Real PostgreSQL
+close/attach and multi-worker interleavings remain deployment acceptance cases.
