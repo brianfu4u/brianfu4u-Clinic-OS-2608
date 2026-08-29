@@ -46,3 +46,6 @@ tenant-scoped initialization transition. Explicit re-evaluation appends each aut
 `OPEN`/`UNMET`/`MET` transition atomically with the current projection, including preserved
 `UNMET -> MET` recovery history. Scheduling, VOID and manager-decision persistence remain
 separate work.
+The current Expectation projection can now be passed through the existing deterministic
+S2 engine and recorded in an immutable, tenant-scoped verification ledger. Persisted
+manager decisions and Workflow closure remain separate work.

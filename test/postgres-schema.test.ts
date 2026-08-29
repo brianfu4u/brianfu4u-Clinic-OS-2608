@@ -20,6 +20,9 @@ const migrationSql = await readFile(
 ) + await readFile(
   new URL("../src/persistence/migrations/0003_expectation_reevaluation.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0004_s2_verification.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -83,6 +86,7 @@ test("fresh migration creates the required tables", async () => {
         "expectation",
         "expectation_transition",
         "manager_decision",
+        "s2_verification",
         "schema_migration",
         "workflow",
         "workflow_artifact_link",
@@ -98,11 +102,16 @@ test("identical migration rerun is a no-op", async () => {
   try {
     assert.deepEqual(
       await applyMigrations(db, migrations),
-      ["0001_trusted_core", "0002_expectation_transition", "0003_expectation_reevaluation"],
+      [
+        "0001_trusted_core",
+        "0002_expectation_transition",
+        "0003_expectation_reevaluation",
+        "0004_s2_verification",
+      ],
     );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 3);
+    assert.equal(ledger.rows.length, 4);
   } finally {
     await db.close();
   }
@@ -414,6 +423,7 @@ test("every business table enables and forces RLS with USING and WITH CHECK", as
       "expectation",
       "expectation_transition",
       "manager_decision",
+      "s2_verification",
     ];
     const flags = await db.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
       `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class
