@@ -202,6 +202,23 @@ test("FactCard cross-tenant Artifact FK fails", async () => {
   }
 });
 
+test("FactCard lineage must be non-empty and contain its source Artifact", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    const insert = `INSERT INTO evidence_fact_card (
+      clinic_id, id, artifact_id, subject_type, identity_anchor, workflow_family,
+      occurred_at, fields, missing_fields, confidence, parser_version, lineage_artifact_ids
+    ) VALUES ('clinic-a', $1, 'artifact-a', 'patient', ' PAT-001 ', 'EYE_EXAM',
+      NOW(), '{}', '{}', 0.9, 'parser-1', $2)`;
+    await rejectQuery(db, insert, ["empty-lineage", []]);
+    await rejectQuery(db, insert, ["missing-source", ["artifact-other"]]);
+    await rejectQuery(db, insert, ["null-lineage", ["artifact-a", null]]);
+  } finally {
+    await db.close();
+  }
+});
+
 test("patient Workflow anchor cannot be null or blank", async () => {
   const db = await migratedDb();
   try {
@@ -211,6 +228,18 @@ test("patient Workflow anchor cannot be null or blank", async () => {
     await rejectQuery(db, insert, ["null-anchor", null]);
     await rejectQuery(db, insert, ["blank-anchor", ""]);
     await rejectQuery(db, insert, ["space-anchor", "   "]);
+    await rejectQuery(
+      db,
+      `INSERT INTO workflow (
+        clinic_id, id, subject_type, identity_anchor, workflow_family, status, created_at, updated_at
+      ) VALUES ('clinic-a', 'uppercase-null-anchor', 'PATIENT', NULL, 'EYE_EXAM', 'OPEN', NOW(), NOW())`,
+    );
+    await rejectQuery(
+      db,
+      `INSERT INTO workflow (
+        clinic_id, id, subject_type, identity_anchor, workflow_family, status, created_at, updated_at
+      ) VALUES ('clinic-a', 'uppercase-blank-anchor', 'PATIENT', '  ', 'EYE_EXAM', 'OPEN', NOW(), NOW())`,
+    );
   } finally {
     await db.close();
   }
@@ -307,6 +336,37 @@ test("manager decision rejects UPDATE and DELETE", async () => {
       NULL, 'manager-a', 'MANAGER', NOW(), '{artifact-a}', 'PENDING', '{CHAIN_OPEN}')`);
     await rejectQuery(db, "UPDATE manager_decision SET note = 'changed'");
     await rejectQuery(db, "DELETE FROM manager_decision");
+  } finally {
+    await db.close();
+  }
+});
+
+test("manager decision enforces closure, evidence, and verification coherence", async () => {
+  const db = await migratedDb();
+  try {
+    await seedArtifact(db);
+    await seedWorkflow(db);
+    await seedExpectation(db);
+    const insert = `INSERT INTO manager_decision (
+      clinic_id, id, workflow_id, expectation_id, action, reason_code, note, actor_id,
+      actor_role, decided_at, evidence_artifact_ids, verification_status, verification_reason_codes
+    ) VALUES ('clinic-a', $1, 'workflow-a', 'expectation-a', $2, $3, NULL,
+      'manager-a', 'MANAGER', NOW(), $4, $5, $6)`;
+    await rejectQuery(db, insert, [
+      "standard-pending", "CLOSE_STANDARD", null, ["artifact-a"], "PENDING", ["CHAIN_OPEN"],
+    ]);
+    await rejectQuery(db, insert, [
+      "verified-with-reason", "CLOSE_STANDARD", null, ["artifact-a"], "VERIFIED", ["CHAIN_OPEN"],
+    ]);
+    await rejectQuery(db, insert, [
+      "empty-evidence", "KEEP_OPEN", null, [], "PENDING", ["CHAIN_OPEN"],
+    ]);
+    await rejectQuery(db, insert, [
+      "null-evidence", "KEEP_OPEN", null, ["artifact-a", null], "PENDING", ["CHAIN_OPEN"],
+    ]);
+    await rejectQuery(db, insert, [
+      "null-verification-reason", "KEEP_OPEN", null, ["artifact-a"], "PENDING", [null],
+    ]);
   } finally {
     await db.close();
   }

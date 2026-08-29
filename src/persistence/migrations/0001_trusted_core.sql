@@ -42,7 +42,11 @@ CREATE TABLE evidence_fact_card (
   missing_fields text[] NOT NULL,
   confidence double precision NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   parser_version text NOT NULL,
-  lineage_artifact_ids text[] NOT NULL,
+  lineage_artifact_ids text[] NOT NULL CHECK (
+    cardinality(lineage_artifact_ids) > 0 AND
+    array_position(lineage_artifact_ids, NULL) IS NULL AND
+    artifact_id = ANY(lineage_artifact_ids)
+  ),
   PRIMARY KEY (clinic_id, id),
   FOREIGN KEY (clinic_id, artifact_id) REFERENCES artifact (clinic_id, id)
 );
@@ -57,7 +61,10 @@ CREATE TABLE workflow (
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (clinic_id, id),
-  CHECK (subject_type <> 'patient' OR (identity_anchor IS NOT NULL AND btrim(identity_anchor) <> ''))
+  CHECK (
+    upper(btrim(subject_type)) <> 'PATIENT' OR
+    (identity_anchor IS NOT NULL AND btrim(identity_anchor) <> '')
+  )
 );
 
 CREATE TABLE workflow_artifact_link (
@@ -114,9 +121,13 @@ CREATE TABLE manager_decision (
   actor_id text NOT NULL,
   actor_role text NOT NULL CHECK (actor_role = 'MANAGER'),
   decided_at timestamptz NOT NULL,
-  evidence_artifact_ids text[] NOT NULL,
+  evidence_artifact_ids text[] NOT NULL CHECK (
+    cardinality(evidence_artifact_ids) > 0 AND
+    array_position(evidence_artifact_ids, NULL) IS NULL
+  ),
   verification_status text NOT NULL CHECK (verification_status IN ('PENDING', 'VERIFIED', 'CONFLICT')),
   verification_reason_codes text[] NOT NULL CHECK (
+    array_position(verification_reason_codes, NULL) IS NULL AND
     verification_reason_codes <@ ARRAY[
       'TRIGGER_NOT_FOUND',
       'CONSEQUENCE_NOT_FOUND',
@@ -132,7 +143,9 @@ CREATE TABLE manager_decision (
   PRIMARY KEY (clinic_id, id),
   FOREIGN KEY (clinic_id, workflow_id) REFERENCES workflow (clinic_id, id),
   FOREIGN KEY (clinic_id, expectation_id) REFERENCES expectation (clinic_id, id),
-  CHECK (action NOT IN ('CLOSE_EXCEPTION', 'VOID') OR reason_code IS NOT NULL)
+  CHECK (action NOT IN ('CLOSE_EXCEPTION', 'VOID') OR reason_code IS NOT NULL),
+  CHECK (action <> 'CLOSE_STANDARD' OR verification_status = 'VERIFIED'),
+  CHECK (verification_status <> 'VERIFIED' OR cardinality(verification_reason_codes) = 0)
 );
 
 CREATE TRIGGER artifact_append_only
