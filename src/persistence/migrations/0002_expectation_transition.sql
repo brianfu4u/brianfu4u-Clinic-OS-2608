@@ -7,7 +7,9 @@ CREATE TABLE expectation_transition (
   id text NOT NULL,
   expectation_id text NOT NULL,
   workflow_id text NOT NULL,
-  from_state text CHECK (from_state IS NULL),
+  from_state text CHECK (
+    from_state IS NULL OR from_state IN ('OPEN', 'MET', 'UNMET', 'VOIDED')
+  ),
   to_state text NOT NULL CHECK (to_state IN ('OPEN', 'MET', 'UNMET', 'VOIDED')),
   evaluated_at timestamptz NOT NULL,
   trigger_artifact_id text NOT NULL,
@@ -29,6 +31,10 @@ CREATE TABLE expectation_transition (
     (to_state <> 'MET' AND satisfied_by_artifact_id IS NULL)
   )
 );
+
+CREATE UNIQUE INDEX expectation_transition_one_initialization
+ON expectation_transition (clinic_id, expectation_id)
+WHERE from_state IS NULL;
 
 CREATE TRIGGER expectation_transition_append_only
 BEFORE UPDATE OR DELETE ON expectation_transition

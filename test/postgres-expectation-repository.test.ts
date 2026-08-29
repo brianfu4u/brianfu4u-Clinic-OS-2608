@@ -480,8 +480,28 @@ test("transition is append-only with fail-closed tenant foreign keys and RLS", a
     await new ExpectationRepository(pool).initializeExpectation(
       actor(), "workflow-a", spec(), BEFORE_DUE,
     );
-    await assert.rejects(pool.db.query("UPDATE expectation_transition SET to_state = 'UNMET'"));
-    await assert.rejects(pool.db.query("DELETE FROM expectation_transition"));
+    await assert.rejects(pool.db.query(
+      `INSERT INTO expectation_transition
+         (id, clinic_id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
+          trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids)
+       VALUES ('second-init', 'clinic-a', 'expectation-a', 'workflow-a', NULL, 'OPEN', $1,
+         'trigger-a', NULL, '{trigger-a}')`,
+      [BEFORE_DUE],
+    ));
+    await pool.db.query(
+      `INSERT INTO expectation_transition
+         (id, clinic_id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
+          trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids)
+       VALUES ('future-transition', 'clinic-a', 'expectation-a', 'workflow-a', 'OPEN', 'UNMET', $1,
+         'trigger-a', NULL, '{trigger-a}')`,
+      [DUE_AT],
+    );
+    await assert.rejects(pool.db.query(
+      "UPDATE expectation_transition SET to_state = 'OPEN' WHERE id = 'future-transition'",
+    ));
+    await assert.rejects(pool.db.query(
+      "DELETE FROM expectation_transition WHERE id = 'future-transition'",
+    ));
     await assert.rejects(pool.db.query(
       `INSERT INTO expectation_transition
          (id, clinic_id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
@@ -503,7 +523,7 @@ test("transition is append-only with fail-closed tenant foreign keys and RLS", a
       `INSERT INTO expectation_transition
          (id, clinic_id, expectation_id, workflow_id, from_state, to_state, evaluated_at,
           trigger_artifact_id, satisfied_by_artifact_id, evidence_artifact_ids)
-       VALUES ('bad-from', 'clinic-a', 'expectation-a', 'workflow-a', 'OPEN', 'OPEN', $1,
+       VALUES ('bad-from', 'clinic-a', 'expectation-a', 'workflow-a', 'INVALID', 'OPEN', $1,
          'trigger-a', NULL, '{trigger-a}')`,
       [BEFORE_DUE],
     ));
