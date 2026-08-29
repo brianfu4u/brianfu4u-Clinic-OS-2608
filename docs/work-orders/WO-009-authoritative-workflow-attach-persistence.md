@@ -1,6 +1,6 @@
 # WO-009 — Authoritative Workflow Attach Persistence
 
-**Status:** APPROVED FOR BUILD  
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -167,3 +167,15 @@ The Builder must:
 5. commit with message `feat(persistence): add authoritative workflow attach`;
 6. report SHA, test count, exact files, dependency/schema changes and deviations;
 7. not push until Architecture Review is complete.
+
+## 14. Architecture acceptance
+
+Accepted on 2026-08-29 through `8070bfa` after two independent review rounds.
+
+- 148/148 tests and both demos pass.
+- Source Artifact and exact candidate Workflow rows are locked before authoritative resolution.
+- Existing, created and deterministic-ID replay outcomes are stable.
+- Patient identity, lineage, tenant and append-only Link authority fail closed.
+- `attachedAt` accepts only real ISO-8601 datetimes with an explicit zone and JavaScript/PostgreSQL-safe millisecond precision.
+
+Real PostgreSQL multi-worker interleavings, application-role RLS, backup and restore remain deployment acceptance gates.
