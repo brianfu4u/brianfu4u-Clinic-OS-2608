@@ -37,3 +37,5 @@ replay therefore compares only the declared Artifact/FactCard timestamp fields b
 identity anchors, payload fields and all other strings remain exact.
 Atomic `ON CONFLICT` capture writes remove the application SELECT-to-INSERT race. Real
 PostgreSQL concurrent replay remains part of the existing real-server acceptance gate.
+Authoritative Workflow attach persistence now covers exact match, deterministic creation
+and append-only Link writes only; Expectation and later closure persistence remain separate.
