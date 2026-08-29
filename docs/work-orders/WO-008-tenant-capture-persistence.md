@@ -1,6 +1,6 @@
 # WO-008 — Tenant Capture Persistence
 
-**Status:** APPROVED FOR BUILD  
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -172,3 +172,16 @@ The Builder must:
 5. commit with message `feat(persistence): add tenant capture repository`;
 6. report SHA, test count, exact files, dependency changes and deviations;
 7. not push until Architecture Review is complete.
+
+## 14. Architecture acceptance
+
+Accepted on 2026-08-29 through `0e7d2b3` after independent review and repair.
+
+- 129/129 tests and both demos pass.
+- Patient FactCard identity is checked against its source Artifact before acquisition.
+- Inputs are synchronously snapshotted before the first asynchronous boundary.
+- Tenant query capability expires when its transaction callback settles.
+- Atomic `ON CONFLICT DO NOTHING` writes replace the application `SELECT`-then-`INSERT` race.
+- Declared `timestamptz` fields compare by instant on replay; identity anchors, JSON and other strings remain exact.
+
+Real PostgreSQL multi-connection concurrency, application-role RLS, backup and restore remain part of the real-server acceptance gate and are not claimed by this ticket.
