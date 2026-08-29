@@ -1,6 +1,7 @@
 import type {
   Expectation,
   ManagerClosureView,
+  VerificationResult,
   Workflow,
 } from "./contracts.ts";
 
@@ -8,12 +9,16 @@ export function projectManagerClosure(input: {
   workflow: Workflow | null;
   expectation: Expectation | null;
   evidenceArtifactIds: readonly string[];
+  verification?: VerificationResult | null;
   matchingAmbiguity?: boolean;
 }): ManagerClosureView {
   const reasonCodes: string[] = [];
   const terminal = input.workflow?.status === "CLOSED" || input.workflow?.status === "VOIDED";
   if (!terminal && input.matchingAmbiguity) reasonCodes.push("MATCHING_AMBIGUITY");
   if (!terminal && input.expectation?.state === "UNMET") reasonCodes.push("EXPECTATION_UNMET");
+  if (!terminal && input.verification?.status === "CONFLICT") {
+    reasonCodes.push("VERIFICATION_CONFLICT");
+  }
 
   return {
     workflowId: input.workflow?.id ?? null,

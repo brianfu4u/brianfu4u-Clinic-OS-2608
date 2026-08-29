@@ -5,6 +5,7 @@ import type {
   ManagerDecision,
   ManagerDecisionAction,
   ManagerClosureView,
+  VerificationResult,
   Workflow,
 } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
@@ -14,6 +15,7 @@ import {
   runGoldenPath,
 } from "../domain/golden-path.ts";
 import { projectManagerClosure } from "../domain/manager-projection.ts";
+import { verifyS2 } from "../domain/s2-verification.ts";
 
 export type EmployeeStatus = "ON_DUTY" | "ON_BREAK" | "OFF_DUTY";
 
@@ -35,6 +37,8 @@ export interface PreviewMessage {
 export interface ManagerPreviewItem extends ManagerClosureView {
   identityAnchor: string;
   workflowFamily: string;
+  verificationStatus: VerificationResult["status"];
+  verificationReasonCodes: string[];
   latestDecision: Pick<ManagerDecision, "action" | "reasonCode" | "decidedAt"> | null;
 }
 
@@ -224,7 +228,14 @@ export class PreviewStore {
       const current = this.#currentWorkflow(workflowId, evaluatedAt);
       const decisions = this.#repositories.workflows.listManagerDecisions(CLINIC_ID, workflowId);
       const latest = decisions.at(-1);
-      return this.#managerItem(stored, current.workflow, current.expectation, current.artifacts, latest);
+      return this.#managerItem(
+        stored,
+        current.workflow,
+        current.expectation,
+        current.verification,
+        current.artifacts,
+        latest,
+      );
     });
   }
 
@@ -245,6 +256,7 @@ export class PreviewStore {
       clinicId: CLINIC_ID,
       workflowId: input.workflowId,
       expectation: current.expectation,
+      verification: current.verification,
       action: input.action,
       reasonCode: input.reasonCode,
       note: input.note,
@@ -258,6 +270,7 @@ export class PreviewStore {
         stored,
         result.workflow,
         current.expectation,
+        current.verification,
         current.artifacts,
         result.decision,
       ),
@@ -288,6 +301,7 @@ export class PreviewStore {
   #currentWorkflow(workflowId: string, now: string): {
     workflow: Workflow;
     expectation: Expectation;
+    verification: VerificationResult;
     artifacts: Artifact[];
   } {
     const stored = this.#expectations.get(workflowId);
@@ -299,20 +313,29 @@ export class PreviewStore {
       .map((link) => this.#repositories.artifacts.get(CLINIC_ID, link.artifactId))
       .filter((artifact): artifact is Artifact => artifact !== null);
     const expectation = evaluateExpectation(stored.expectation, artifacts, now);
+    const verification = verifyS2({ workflow, expectation, linkedArtifacts: artifacts, now });
     stored.expectation = expectation;
-    return { workflow, expectation, artifacts };
+    return { workflow, expectation, verification, artifacts };
   }
 
   #managerItem(
     stored: StoredExpectation,
     workflow: Workflow,
     expectation: Expectation,
+    verification: VerificationResult,
     artifacts: readonly Artifact[],
     latestDecision?: ManagerDecision,
   ): ManagerPreviewItem {
+    const terminal = workflow.status === "CLOSED" || workflow.status === "VOIDED";
     return {
       identityAnchor: stored.identityAnchor,
       workflowFamily: workflow.workflowFamily,
+      verificationStatus: terminal && latestDecision
+        ? latestDecision.verificationStatus
+        : verification.status,
+      verificationReasonCodes: terminal && latestDecision
+        ? [...latestDecision.verificationReasonCodes]
+        : [...verification.reasonCodes],
       latestDecision: latestDecision
         ? {
             action: latestDecision.action,
@@ -323,6 +346,7 @@ export class PreviewStore {
       ...projectManagerClosure({
         workflow,
         expectation,
+        verification,
         evidenceArtifactIds: artifacts.map(({ id }) => id),
       }),
     };

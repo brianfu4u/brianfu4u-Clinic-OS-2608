@@ -127,6 +127,8 @@ test("valid registration creates OPEN quiet manager projection", async () => {
     const closures = (await json(baseUrl, "/api/manager/closures")).body;
     assert.equal(closures.length, 1);
     assert.equal(closures[0].expectationState, "OPEN");
+    assert.equal(closures[0].verificationStatus, "PENDING");
+    assert.deepEqual(closures[0].verificationReasonCodes, ["CHAIN_OPEN"]);
     assert.equal(closures[0].needsReview, false);
   });
 });
@@ -162,6 +164,9 @@ test("same-anchor EXAM_REPORT attaches to the same Workflow and becomes MET", as
     assert.equal(report.body.workflowId, registration.body.workflowId);
     assert.equal(report.body.expectationState, "MET");
     assert.deepEqual(store.debugCounts(), { artifacts: 2, workflows: 1, expectations: 1 });
+    const [closure] = (await json(baseUrl, "/api/manager/closures")).body;
+    assert.equal(closure.verificationStatus, "VERIFIED");
+    assert.deepEqual(closure.verificationReasonCodes, []);
   });
 });
 
@@ -358,6 +363,9 @@ test("manager POST rejects caller-controlled authority and lineage fields", asyn
         decisionId: "caller-decision",
         evidenceArtifactIds: [],
         workflowStatus: "CLOSED",
+        verification: { status: "VERIFIED" },
+        verificationStatus: "VERIFIED",
+        verificationReasonCodes: [],
       }),
     });
     assert.equal(refused.response.status, 400);

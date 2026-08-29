@@ -4,6 +4,7 @@ import type {
   Expectation,
   ManagerDecision,
   ManagerDecisionAction,
+  VerificationResult,
   Workflow,
   WorkflowArtifactLink,
 } from "./contracts.ts";
@@ -27,6 +28,7 @@ export interface ManagerDecisionInput {
   clinicId: string;
   workflowId: string;
   expectation: Expectation;
+  verification: VerificationResult;
   action: ManagerDecisionAction;
   reasonCode: string | null;
   note: string | null;
@@ -46,6 +48,18 @@ export const MANAGER_REASON_CODES = [
   "DUPLICATE_WORKFLOW",
   "PATIENT_CANCELLED",
   "NEEDS_MORE_EVIDENCE",
+] as const;
+
+const VERIFICATION_REASON_CODES = [
+  "TRIGGER_NOT_FOUND",
+  "CONSEQUENCE_NOT_FOUND",
+  "IDENTITY_CONFLICT",
+  "TIME_CONFLICT",
+  "KIND_CONFLICT",
+  "EXPECTATION_EVIDENCE_CONFLICT",
+  "CHAIN_OPEN",
+  "CHAIN_UNMET",
+  "CHAIN_VOIDED",
 ] as const;
 
 function freezeDeep<T>(value: T): T {
@@ -173,7 +187,52 @@ export class WorkflowSaga {
         "Only a MET Expectation may identify satisfying evidence.",
       );
     }
-
+    const verificationEvaluatedAt = Date.parse(input.verification.evaluatedAt);
+    if (
+      input.verification.workflowId !== input.workflowId ||
+      input.verification.expectationId !== input.expectation.id ||
+      !["PENDING", "VERIFIED", "CONFLICT"].includes(input.verification.status) ||
+      !Array.isArray(input.verification.reasonCodes) ||
+      !Array.isArray(input.verification.evidenceArtifactIds) ||
+      input.verification.reasonCodes.some(
+        (reason) => !(VERIFICATION_REASON_CODES as readonly string[]).includes(reason),
+      ) ||
+      !Number.isFinite(verificationEvaluatedAt) ||
+      input.verification.evaluatedAt !== input.expectation.evaluatedAt ||
+      verificationEvaluatedAt > decidedAt ||
+      input.verification.evidenceArtifactIds.some((id) => !visibleArtifactIds.includes(id)) ||
+      (
+        input.verification.triggerArtifactId !== null &&
+        !visibleArtifactIds.includes(input.verification.triggerArtifactId)
+      ) ||
+      (
+        input.verification.consequenceArtifactId !== null &&
+        !visibleArtifactIds.includes(input.verification.consequenceArtifactId)
+      )
+    ) {
+      throw new DomainError(
+        "INVALID_VERIFICATION_SNAPSHOT",
+        "Verification snapshot must match evidence visible at decision time.",
+      );
+    }
+    if (
+      input.verification.status === "VERIFIED" &&
+      (
+        input.expectation.state !== "MET" ||
+        input.verification.reasonCodes.length !== 0 ||
+        input.verification.triggerArtifactId === null ||
+        input.verification.consequenceArtifactId === null ||
+        input.verification.consequenceArtifactId !== input.expectation.satisfiedByArtifactId ||
+        input.verification.evidenceArtifactIds.length !== 2 ||
+        input.verification.evidenceArtifactIds[0] !== input.verification.triggerArtifactId ||
+        input.verification.evidenceArtifactIds[1] !== input.verification.consequenceArtifactId
+      )
+    ) {
+      throw new DomainError(
+        "INVALID_VERIFICATION_SNAPSHOT",
+        "VERIFIED requires coherent trigger and consequence evidence.",
+      );
+    }
     const reasonCode = nullableText(input.reasonCode, 100, "INVALID_REASON_CODE");
     if (
       reasonCode !== null &&
@@ -193,6 +252,8 @@ export class WorkflowSaga {
       actorRole: "MANAGER",
       decidedAt: input.decidedAt,
       evidenceArtifactIds: visibleArtifactIds,
+      verificationStatus: input.verification.status,
+      verificationReasonCodes: [...input.verification.reasonCodes],
     };
 
     const existing = this.#decisions.get(input.id);
@@ -209,7 +270,12 @@ export class WorkflowSaga {
       throw new DomainError("WORKFLOW_TERMINAL", "Closed and voided Workflows are terminal.");
     }
 
-    this.#assertDecisionAllowed(input.action, input.expectation.state, reasonCode);
+    this.#assertDecisionAllowed(
+      input.action,
+      input.expectation.state,
+      input.verification.status,
+      reasonCode,
+    );
     const nextWorkflow: Workflow = {
       ...workflow,
       status: input.action === "VOID"
@@ -295,10 +361,14 @@ export class WorkflowSaga {
   #assertDecisionAllowed(
     action: ManagerDecisionAction,
     state: Expectation["state"],
+    verificationStatus: VerificationResult["status"],
     reasonCode: string | null,
   ): void {
-    if (action === "CLOSE_STANDARD" && state !== "MET") {
-      throw new DomainError("DECISION_NOT_ALLOWED", "Standard close requires a MET Expectation.");
+    if (action === "CLOSE_STANDARD" && (state !== "MET" || verificationStatus !== "VERIFIED")) {
+      throw new DomainError(
+        "DECISION_NOT_ALLOWED",
+        "Standard close requires MET and VERIFIED.",
+      );
     }
     if (action === "CLOSE_EXCEPTION" && (state !== "UNMET" || reasonCode === null)) {
       throw new DomainError(

@@ -8,6 +8,7 @@ const strings = {
     all: "すべて", review: "要確認", open: "進行中", complete: "完了", refresh: "更新",
     noItems: "表示するワークフローはありません。", needsReview: "要確認", quiet: "確認不要",
     action: "店長アクション", reason: "理由コード", note: "任意メモ", decide: "決定を記録", latest: "最新決定",
+    expectation: "予期", verification: "S2検証",
   },
   zh: {
     product: "Clinic OS · 合成数据预览", employee: "员工端", manager: "店长端",
@@ -18,6 +19,7 @@ const strings = {
     all: "全部", review: "需复核", open: "进行中", complete: "完成", refresh: "刷新",
     noItems: "暂无工作流。", needsReview: "需要复核", quiet: "无需复核",
     action: "店长操作", reason: "原因代码", note: "可选备注", decide: "记录决定", latest: "最近决定",
+    expectation: "预期状态", verification: "S2验证",
   },
   en: {
     product: "Clinic OS · Synthetic preview", employee: "Employee", manager: "Manager",
@@ -28,6 +30,7 @@ const strings = {
     all: "All", review: "Needs review", open: "Open", complete: "Complete", refresh: "Refresh",
     noItems: "No workflows to display.", needsReview: "Needs review", quiet: "No review needed",
     action: "Manager action", reason: "Reason code", note: "Optional note", decide: "Record decision", latest: "Latest decision",
+    expectation: "Expectation", verification: "S2 verification",
   },
 };
 
@@ -172,7 +175,8 @@ function renderManager() {
       <button type="button" id="refresh">${t("refresh")}</button></div>
     <section class="cards">${visible.map((item) => `<article class="card ${item.needsReview ? "review" : ""}">
       <h2>${escapeHtml(item.identityAnchor)} · ${escapeHtml(item.workflowFamily)}</h2>
-      <p><strong>${escapeHtml(item.expectationState)}</strong> · ${item.needsReview ? t("needsReview") : t("quiet")}</p>
+      <p>${t("expectation")}: <strong>${escapeHtml(item.expectationState)}</strong><br>${t("verification")}: <strong>${escapeHtml(item.verificationStatus)}</strong> ${item.verificationReasonCodes.map(escapeHtml).join(", ")}</p>
+      <p>${item.needsReview ? t("needsReview") : t("quiet")}</p>
       <p class="muted">Workflow: ${escapeHtml(item.workflowId)}<br>Evidence: ${item.evidenceArtifactIds.map(escapeHtml).join(", ") || "—"}<br>Reasons: ${item.reasonCodes.map(escapeHtml).join(", ") || "—"}</p>
       ${item.latestDecision ? `<p>${t("latest")}: ${escapeHtml(item.latestDecision.action)}${item.latestDecision.reasonCode ? ` · ${escapeHtml(item.latestDecision.reasonCode)}` : ""}</p>` : ""}
       ${decisionForm(item)}

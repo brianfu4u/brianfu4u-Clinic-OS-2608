@@ -70,6 +70,17 @@ export interface ManagerClosureView {
   reasonCodes: string[];
 }
 
+export interface VerificationResult {
+  workflowId: string;
+  expectationId: string;
+  status: "PENDING" | "VERIFIED" | "CONFLICT";
+  reasonCodes: string[];
+  triggerArtifactId: string | null;
+  consequenceArtifactId: string | null;
+  evidenceArtifactIds: string[];
+  evaluatedAt: IsoTimestamp;
+}
+
 export type ManagerDecisionAction =
   | "CLOSE_STANDARD"
   | "CLOSE_EXCEPTION"
@@ -88,6 +99,8 @@ export interface ManagerDecision {
   actorRole: "MANAGER";
   decidedAt: IsoTimestamp;
   evidenceArtifactIds: string[];
+  verificationStatus: VerificationResult["status"];
+  verificationReasonCodes: string[];
 }
 
 export type WorkflowResolution =

@@ -4,6 +4,7 @@ import test from "node:test";
 import type {
   Expectation,
   ManagerDecisionAction,
+  VerificationResult,
   Workflow,
   WorkflowArtifactLink,
 } from "../src/domain/contracts.ts";
@@ -82,12 +83,35 @@ function decisionInput(
     clinicId: CLINIC_ID,
     workflowId: WORKFLOW_ID,
     expectation: expectation(state),
+    verification: verification(state),
     action,
     reasonCode: null,
     note: null,
     actorId: "manager-1",
     actorRole: "MANAGER",
     decidedAt: NOW,
+    ...overrides,
+  };
+}
+
+function verification(
+  state: Expectation["state"] = "MET",
+  overrides: Partial<VerificationResult> = {},
+): VerificationResult {
+  const verified = state === "MET";
+  return {
+    workflowId: WORKFLOW_ID,
+    expectationId: "expectation-1",
+    status: verified ? "VERIFIED" : "PENDING",
+    reasonCodes: verified
+      ? []
+      : [state === "UNMET" ? "CHAIN_UNMET" : state === "VOIDED" ? "CHAIN_VOIDED" : "CHAIN_OPEN"],
+    triggerArtifactId: "artifact-registration",
+    consequenceArtifactId: verified ? "artifact-report" : null,
+    evidenceArtifactIds: verified
+      ? ["artifact-registration", "artifact-report"]
+      : ["artifact-registration"],
+    evaluatedAt: NOW,
     ...overrides,
   };
 }
@@ -99,10 +123,13 @@ test("CLOSE_STANDARD closes MET and stores an immutable decision", () => {
   assert.equal(result.workflow.status, "CLOSED");
   assert.equal(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID).length, 1);
   result.decision.evidenceArtifactIds.push("caller-mutation");
+  result.decision.verificationReasonCodes.push("caller-mutation");
   result.decision.note = "caller-mutation";
   const [stored] = store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID);
   assert.deepEqual(stored.evidenceArtifactIds, ["artifact-registration", "artifact-report"]);
   assert.equal(stored.note, null);
+  assert.equal(stored.verificationStatus, "VERIFIED");
+  assert.deepEqual(stored.verificationReasonCodes, []);
 });
 
 test("CLOSE_STANDARD refuses OPEN and UNMET without mutation", () => {
@@ -323,4 +350,37 @@ test("invalid link time fails decision snapshot closed", () => {
   );
   assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
   assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
+});
+
+test("standard close refuses conflicting or fabricated Verification snapshots", () => {
+  const inputs = [
+    decisionInput("MET", "CLOSE_STANDARD", {
+      verification: verification("MET", {
+        status: "CONFLICT",
+        reasonCodes: ["IDENTITY_CONFLICT"],
+      }),
+    }),
+    decisionInput("MET", "CLOSE_STANDARD", {
+      verification: verification("MET", {
+        triggerArtifactId: "artifact-not-linked",
+        evidenceArtifactIds: ["artifact-not-linked", "artifact-report"],
+      }),
+    }),
+    decisionInput("MET", "CLOSE_STANDARD", {
+      verification: verification("MET", {
+        evaluatedAt: "2026-08-29T09:14:59.999Z",
+      }),
+    }),
+    decisionInput("MET", "CLOSE_STANDARD", {
+      verification: verification("MET", {
+        reasonCodes: ["MODEL_SAYS_OK"],
+      }),
+    }),
+  ];
+  for (const input of inputs) {
+    const store = saga();
+    assert.throws(() => store.recordManagerDecision(input), DomainError);
+    assert.equal(store.getWorkflow(CLINIC_ID, WORKFLOW_ID)?.status, "OPEN");
+    assert.deepEqual(store.listManagerDecisions(CLINIC_ID, WORKFLOW_ID), []);
+  }
 });
