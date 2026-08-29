@@ -1,6 +1,6 @@
 # WO-013 — Persisted Manager Decision and Workflow Closure Saga
 
-**Status:** READY FOR BUILD
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -152,3 +152,18 @@ npm run runtime:demo
 ## 10. Builder handoff
 
 The Builder must read the Constitution and WO-003 plus WO-007 through WO-013, implement only this slice, run all acceptance commands, commit as `feat(persistence): add manager decision saga`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 11. Architecture acceptance
+
+Accepted on 2026-08-29 through `05d9994` after independent review.
+
+- 201/201 tests and both demos pass.
+- The in-memory and PostgreSQL paths share one pure manager-action guard.
+- Manager authority derives only from `ActorContext`; caller-supplied authority, verdict and evidence fields are rejected.
+- Decisions bind the exact current Expectation transition and persisted `S2_V1` status/reason snapshot.
+- Standard close, exception close, keep-open and human VOID preserve their distinct semantics.
+- Human VOID appends history and atomically updates both Expectation and Workflow projections.
+- Decision, transition and projection writes commit or roll back together; terminal replay is idempotent.
+- Constitution and migrations `0001` through `0004` remain unchanged; no dependency was added.
+
+Preview/API persistence parity, reopen/correction flows, real PostgreSQL application-role RLS/concurrency, backup and restore remain later acceptance gates.
