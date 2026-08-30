@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -93,6 +94,13 @@ function registration(identityAnchor = "DEMO-001", occurredAt = "2026-08-30T09:0
   } satisfies RequestInit;
 }
 
+function previewStableId(prefix: string, context: ActorContext, key: string): string {
+  return `${prefix}:${createHash("sha256")
+    .update(JSON.stringify([context.clinicId, context.actorId, key]))
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 test("durable registration creates the persisted trigger chain and survives restart", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
@@ -143,6 +151,74 @@ test("registration replay is stable and changed identity under one key conflicts
       assert.equal(changed.response.status, 409);
       assert.equal(changed.body.error, "REGISTRATION_CONFLICT");
     }, () => "2026-08-30T09:11:00.000Z");
+  } finally { await pool.close(); }
+});
+
+test("registration snapshots caller authority and input before the first database await", async () => {
+  const pool = new Pool(); await pool.migrate();
+  try {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let delayed = false;
+    const delayedPool: DatabasePool = {
+      async connect() {
+        const connection = await pool.connect();
+        return {
+          release: () => connection.release(),
+          async query<Row extends Record<string, unknown>>(text: string, values?: readonly unknown[]) {
+            if (!delayed && text.includes("FROM artifact WHERE clinic_id")) {
+              delayed = true;
+              entered();
+              await gate;
+            }
+            return connection.query<Row>(text, values);
+          },
+        };
+      },
+    };
+    const backend = new PostgresClinicalPreviewBackend(delayedPool);
+    const context: ActorContext = { ...EMPLOYEE };
+    const input = {
+      identityAnchor: "DEMO-001",
+      occurredAt: "2026-08-30T09:00:00.000Z",
+      receivedAt: NOW,
+      idempotencyKey: "snapshot-registration-0001",
+    };
+    const originalArtifactId = previewStableId("artifact", EMPLOYEE, input.idempotencyKey);
+    const originalFactCardId = previewStableId("fact", EMPLOYEE, input.idempotencyKey);
+    const originalExpectationId = previewStableId("expectation", EMPLOYEE, input.idempotencyKey);
+    const pending = backend.createRegistrationTrigger(context, input);
+    await started;
+    context.clinicId = "other-clinic";
+    context.actorId = "other-employee";
+    context.role = "MANAGER";
+    input.identityAnchor = "DEMO-002";
+    input.idempotencyKey = "mutated-registration-0002";
+    release();
+
+    const result = await pending;
+    assert.deepEqual(result, {
+      status: "COMPLETED",
+      expectationId: originalExpectationId,
+      expectationState: "OPEN",
+      verificationStatus: "PENDING",
+    });
+    assert.deepEqual((await pool.db.query<{
+      id: string; clinic_id: string; source_employee_id: string; identity_anchor: string;
+    }>("SELECT id, clinic_id, source_employee_id, identity_anchor FROM artifact")).rows, [{
+      id: originalArtifactId,
+      clinic_id: EMPLOYEE.clinicId,
+      source_employee_id: EMPLOYEE.actorId,
+      identity_anchor: "DEMO-001",
+    }]);
+    assert.deepEqual((await pool.db.query<{ id: string; clinic_id: string }>(
+      "SELECT id, clinic_id FROM evidence_fact_card",
+    )).rows, [{ id: originalFactCardId, clinic_id: EMPLOYEE.clinicId }]);
+    assert.equal((await pool.db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM artifact WHERE clinic_id = 'other-clinic'",
+    )).rows[0].count, "0");
   } finally { await pool.close(); }
 });
 

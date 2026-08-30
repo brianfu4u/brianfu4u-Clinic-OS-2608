@@ -136,7 +136,11 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     context: ActorContext,
     rawInput: ClinicalRegistrationTriggerInput,
   ): Promise<ClinicalRegistrationTriggerResult> {
-    assertActorAccess(context, context.clinicId, "EMPLOYEE");
+    // This command performs a read-before-write retry. Freeze the authority at
+    // the entry boundary so a caller cannot mutate its context while a database
+    // await is in flight and redirect the retry into another tenant.
+    const capturedContext = snapshotActorContext(context);
+    assertActorAccess(capturedContext, capturedContext.clinicId, "EMPLOYEE");
     const input = structuredClone(rawInput);
     requireExactRegistrationInput(input);
     requireKey(input.idempotencyKey);
@@ -148,23 +152,23 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     if (!isExactDemoAnchor(input.identityAnchor)) {
       throw new DomainError("INVALID_CLINICAL_PREVIEW_INPUT", "Only synthetic EYE_EXAM data is accepted.");
     }
-    const artifactId = stableId("artifact", context, input.idempotencyKey);
-    const existingArtifact = await this.#capture.getArtifact(context, artifactId);
+    const artifactId = stableId("artifact", capturedContext, input.idempotencyKey);
+    const existingArtifact = await this.#capture.getArtifact(capturedContext, artifactId);
     let operationAt = existingArtifact?.createdAt ?? input.receivedAt;
     const artifact: Artifact = {
       id: artifactId,
-      clinicId: context.clinicId,
+      clinicId: capturedContext.clinicId,
       kind: "REGISTRATION",
       occurredAt: input.occurredAt,
       occurredAtSource: "employee_confirmed",
-      sourceEmployeeId: context.actorId,
+      sourceEmployeeId: capturedContext.actorId,
       identityAnchor: input.identityAnchor,
       payload: { previewRegistration: true },
       createdAt: operationAt,
     };
     const factCard: EvidenceFactCard = {
-      id: stableId("fact", context, input.idempotencyKey),
-      clinicId: context.clinicId,
+      id: stableId("fact", capturedContext, input.idempotencyKey),
+      clinicId: capturedContext.clinicId,
       artifactId,
       subjectType: "PATIENT",
       identityAnchor: input.identityAnchor,
@@ -176,11 +180,11 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       parserVersion: "preview-registration-trigger-1",
       lineageArtifactIds: [artifactId],
     };
-    const run = () => this.#path.recordTrigger(context, {
+    const run = () => this.#path.recordTrigger(capturedContext, {
           artifact,
           factCard,
           expectation: {
-            id: stableId("expectation", context, input.idempotencyKey),
+            id: stableId("expectation", capturedContext, input.idempotencyKey),
             triggerKind: "REGISTRATION",
             consequenceKind: "EXAM_REPORT",
             triggeredAt: input.occurredAt,
@@ -194,7 +198,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       result = await run();
     } catch (error) {
       if (!(error instanceof DomainError) || error.code !== "ARTIFACT_ID_CONFLICT" || existingArtifact) throw error;
-      const racedArtifact = await this.#capture.getArtifact(context, artifactId);
+      const racedArtifact = await this.#capture.getArtifact(capturedContext, artifactId);
       if (!racedArtifact) throw error;
       artifact.createdAt = racedArtifact.createdAt;
       operationAt = racedArtifact.createdAt;
@@ -251,6 +255,26 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       return this.#decisions.recordManagerDecision(context, command);
     }
   }
+}
+
+function snapshotActorContext(value: ActorContext): ActorContext {
+  let captured: ActorContext;
+  try {
+    captured = structuredClone(value);
+    if (
+      !captured ||
+      typeof captured !== "object" ||
+      Array.isArray(captured) ||
+      Object.getPrototypeOf(captured) !== Object.prototype ||
+      Object.keys(captured).length !== 3 ||
+      !["actorId", "clinicId", "role"].every((key) => Object.hasOwn(captured, key))
+    ) {
+      throw new Error("invalid ActorContext shape");
+    }
+  } catch {
+    throw new DomainError("INVALID_ACTOR_CONTEXT", "ActorContext must contain exact clinic, actor and role values.");
+  }
+  return captured;
 }
 
 export function requireIdempotencyKey(value: string | undefined): string {
