@@ -87,10 +87,15 @@ The restartable persisted golden-path application service now coordinates captur
 attach, Expectation evaluation and S2 Verification for explicit trigger and consequence commands.
 Each repository stage remains its own short atomic transaction; replay resumes incomplete chains
 without claiming a global Artifact-to-Verification transaction.
-An explicitly supplied clinical backend now runs work updates, manager closure reads and
-manager decisions through PostgreSQL while topics, ordinary chat and employee status remain
-volatile synthetic preview state. The default `npm run preview` path remains wholly in memory;
-missing PostgreSQL configuration never silently selects it as a persistence fallback.
+An explicitly supplied clinical backend now accepts one narrow durable employee command:
+`POST /api/employee/registration-trigger` with only an exact synthetic identity anchor and
+occurrence instant. The server derives all Artifact, FactCard and Expectation identities, then
+uses the persisted golden path to create an `EXAM_REPORT` expectation due fifteen minutes later.
+The browser refreshes the employee-safe open-expectations list before evidence upload; it never
+uses the registration response as upload authority. In this mode legacy
+`/api/employee/work-updates` is disabled for clinical writes. Topics, ordinary chat and employee
+status remain volatile synthetic preview state. The default `npm run preview` path remains wholly
+in memory; missing PostgreSQL configuration never silently selects it as a persistence fallback.
 Reopen/correction flows, real PostgreSQL application-role
 RLS/concurrency proof, backup and restore remain separate acceptance gates.
 

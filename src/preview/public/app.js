@@ -15,6 +15,7 @@ const strings = {
     missingExpectation: "処理する未完了の検査レポートを選択してください。",
     expectationSelect: "未完了の検査レポート", expectationLoading: "未完了の検査レポートを読み込み中…", expectationEmpty: "選択できる未完了の検査レポートはありません。",
     chooseEvidence: "PNG、JPEG、またはPDFファイルを選択してください。",
+    registrationRecorded: "受付登録を記録しました。次に未完了の検査レポートを選択してください。",
     evidenceCompleted: "証拠を処理しました", extractionReview: "証拠の抽出に確認が必要です。", compositionReview: "ワークフロー照合に確認が必要です。",
     networkError: "プレビューサービスに接続できませんでした。もう一度お試しください。",
   },
@@ -34,6 +35,7 @@ const strings = {
     missingExpectation: "请选择要处理的未完成检查报告。",
     expectationSelect: "待处理检查报告", expectationLoading: "正在读取待处理检查报告…", expectationEmpty: "没有可选择的待处理检查报告。",
     chooseEvidence: "请选择PNG、JPEG或PDF文件。",
+    registrationRecorded: "登记已记录。请接着选择待处理检查报告。",
     evidenceCompleted: "证据已处理", extractionReview: "证据抽取需要复核。", compositionReview: "工作流匹配需要复核。",
     networkError: "无法连接预览服务，请重试。",
   },
@@ -53,6 +55,7 @@ const strings = {
     missingExpectation: "Select an open exam report expectation first.",
     expectationSelect: "Open exam report", expectationLoading: "Loading open exam reports…", expectationEmpty: "No selectable open exam reports.",
     chooseEvidence: "Choose a PNG, JPEG, or PDF evidence file.",
+    registrationRecorded: "Registration recorded. Select an open exam report next.",
     evidenceCompleted: "Evidence processed", extractionReview: "Evidence extraction needs review.", compositionReview: "Workflow matching needs review.",
     networkError: "The preview service could not be reached. Please try again.",
   },
@@ -68,6 +71,9 @@ let expectationLoadEpoch = 0;
 const pendingDecisionKeys = new Map();
 let postgresClinical = false;
 let evidenceStatus = null;
+let registrationStatus = null;
+let composerMode = "conversation";
+let composerKind = "REGISTRATION";
 const app = document.querySelector("#app");
 const t = (key) => strings[language][key];
 const previewNotice = () => `${t("synthetic")}${postgresClinical ? ` ${t("hybrid")}` : ""}`;
@@ -96,6 +102,10 @@ function safeServerError(code, status) {
   const messages = {
     PERSISTED_UPLOAD_UNAVAILABLE: "Durable evidence upload is unavailable in this preview.",
     PERSISTED_TRANSPORT_UNAVAILABLE: "Durable evidence extraction is unavailable in this preview.",
+    PERSISTED_REGISTRATION_UNAVAILABLE: "Durable registration is unavailable in this preview.",
+    LEGACY_CLINICAL_COMMAND_DISABLED: "Use the explicit registration or evidence command.",
+    REGISTRATION_CONFLICT: "This registration conflicts with an existing operation.",
+    INVALID_REGISTRATION_REQUEST: "The registration request could not be accepted.",
     INVALID_UPLOAD: "The selected evidence could not be accepted.",
     UNSUPPORTED_CONTENT_TYPE: "Select a PNG, JPEG, or PDF evidence file.",
     UPLOAD_TOO_LARGE: "The selected evidence file is too large.",
@@ -147,6 +157,7 @@ function renderEmployee() {
     </aside>
     <main class="main"><div class="topbar"><h2>${escapeHtml(topic?.title || t("employee"))}</h2>${languageButtons()}</div>
       <p class="notice">${previewNotice()}</p>
+      ${registrationStatus ? `<p class="evidence-status success" role="status">${t("registrationRecorded")}</p>` : ""}
       ${evidenceStatus ? evidenceStatusMarkup() : ""}
       <section class="thread" aria-label="Message thread">${messages.map((message) => `<div class="message ${message.role === "EMPLOYEE" ? "employee" : ""}">${escapeHtml(message.text)}</div>`).join("") || `<p class="empty">${t("newTopic")}</p>`}</section>
       ${topic ? composer() : ""}
@@ -185,10 +196,10 @@ function topicList() {
 function composer() {
   const local = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   return `<form class="composer" id="composer"><div class="mode">
-    <label><input type="radio" name="mode" value="conversation" checked> ${t("conversation")}</label>
-    <label><input type="radio" name="mode" value="work"> ${t("work")}</label></div>
-    <div class="work-fields" hidden>
-      <label>${t("kind")}<select name="kind"><option value="REGISTRATION">REGISTRATION</option><option value="EXAM_REPORT">EXAM_REPORT</option></select></label>
+    <label><input type="radio" name="mode" value="conversation" ${composerMode === "conversation" ? "checked" : ""}> ${t("conversation")}</label>
+    <label><input type="radio" name="mode" value="work" ${composerMode === "work" ? "checked" : ""}> ${t("work")}</label></div>
+    <div class="work-fields" ${composerMode === "work" ? "" : "hidden"}>
+      <label>${t("kind")}<select name="kind"><option value="REGISTRATION" ${composerKind === "REGISTRATION" ? "selected" : ""}>REGISTRATION</option><option value="EXAM_REPORT" ${composerKind === "EXAM_REPORT" ? "selected" : ""}>EXAM_REPORT</option></select></label>
       <label>${t("anchor")}<input name="identityAnchor" value="DEMO-001" required></label>
       <label>${t("family")}<input name="workflowFamily" value="EYE_EXAM" readonly></label>
       <label>${t("occurredAt")}<input name="occurredAt" type="datetime-local" value="${local}" required></label>
@@ -200,7 +211,7 @@ function composer() {
         <p class="muted" data-evidence-help></p>
       </div>
     </div>
-    <label for="message-text">${t("message")}</label><textarea id="message-text" name="text" required></textarea>
+    <div data-message-field ${postgresClinical && composerMode === "work" ? "hidden" : ""}><label for="message-text">${t("message")}</label><textarea id="message-text" name="text" ${postgresClinical && composerMode === "work" ? "disabled" : "required"}></textarea></div>
     <button class="primary" type="submit">${t("send")}</button><p id="form-error" role="alert"></p>
   </form>`;
 }
@@ -209,11 +220,12 @@ function bindComposer() {
   const form = document.querySelector("#composer");
   if (!form) return;
   form.querySelectorAll('[name="mode"]').forEach((radio) => radio.addEventListener("change", () => {
+    composerMode = form.elements.mode.value;
     form.querySelector(".work-fields").hidden = form.elements.mode.value !== "work";
     updateEvidenceControl(form);
   }));
-  form.elements.kind.addEventListener("change", () => updateEvidenceControl(form));
-  form.elements.identityAnchor.addEventListener("change", () => updateEvidenceControl(form));
+  form.elements.kind.addEventListener("change", () => { composerKind = form.elements.kind.value; registrationStatus = null; updateEvidenceControl(form); });
+  form.elements.identityAnchor.addEventListener("change", () => { registrationStatus = null; updateEvidenceControl(form); });
   form.addEventListener("input", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("change", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("submit", async (event) => {
@@ -228,12 +240,16 @@ function bindComposer() {
           return;
         }
         form.dataset.idempotencyKey ||= crypto.randomUUID();
-        const result = await api("/api/employee/work-updates", { method: "POST", headers: {
+        const result = await api(postgresClinical ? "/api/employee/registration-trigger" : "/api/employee/work-updates", { method: "POST", headers: {
           "idempotency-key": form.dataset.idempotencyKey,
-        }, body: JSON.stringify({
-          topicId: activeTopicId, kind, identityAnchor,
-          workflowFamily: data.get("workflowFamily"), occurredAt: new Date(data.get("occurredAt")).toISOString(), text: data.get("text"),
-        }) });
+        }, body: JSON.stringify(postgresClinical
+          ? { identityAnchor, occurredAt: new Date(data.get("occurredAt")).toISOString() }
+          : { topicId: activeTopicId, kind, identityAnchor, workflowFamily: data.get("workflowFamily"), occurredAt: new Date(data.get("occurredAt")).toISOString(), text: data.get("text") }) });
+        if (postgresClinical) {
+          validateRegistrationProjection(result);
+          registrationStatus = result.status === "COMPLETED";
+          if (result.status === "COMPLETED") await loadOpenExpectations(form);
+        }
         delete form.dataset.idempotencyKey;
       } else {
         await api("/api/employee/messages", { method: "POST", body: JSON.stringify({ topicId: activeTopicId, text: data.get("text") }) });
@@ -251,6 +267,11 @@ function updateEvidenceControl(form) {
   const file = form.elements.evidenceFile;
   const help = form.querySelector("[data-evidence-help]");
   const report = form.elements.kind.value === "EXAM_REPORT" && form.elements.mode.value === "work";
+  const message = form.querySelector("[data-message-field]");
+  const text = form.elements.text;
+  message.hidden = postgresClinical && form.elements.mode.value === "work";
+  text.disabled = postgresClinical && form.elements.mode.value === "work";
+  text.required = !(postgresClinical && form.elements.mode.value === "work");
   control.hidden = !report;
   file.disabled = !report || !postgresClinical;
   const select = form.elements.expectationId;
@@ -262,6 +283,16 @@ function updateEvidenceControl(form) {
   if (!report) {
     openExpectations = [];
   }
+}
+
+function validateRegistrationProjection(value) {
+  if (!isPlainObject(value)) throw new Error(t("networkError"));
+  if (value.status === "REVIEW_REQUIRED" && exactKeys(value, ["status"])) return { status: "REVIEW_REQUIRED" };
+  if (value.status === "COMPLETED" && exactKeys(value, ["expectationId", "expectationState", "status", "verificationStatus"]) &&
+      isBoundedId(value.expectationId) && ["OPEN", "UNMET"].includes(value.expectationState) && value.verificationStatus === "PENDING") {
+    return { status: "COMPLETED", expectationState: value.expectationState };
+  }
+  throw new Error(t("networkError"));
 }
 
 async function loadOpenExpectations(form) {

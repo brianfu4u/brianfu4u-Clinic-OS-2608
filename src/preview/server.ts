@@ -43,6 +43,7 @@ const INDEX_FILE = fileURLToPath(new URL("./public/index.html", import.meta.url)
 const EXTRACTION_PATH = "/api/employee/extraction/exam-report";
 const UPLOAD_PATH = "/api/employee/evidence-objects";
 const OPEN_EXPECTATIONS_PATH = "/api/employee/open-expectations";
+const REGISTRATION_TRIGGER_PATH = "/api/employee/registration-trigger";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024 + 1024 * 1024;
 const MAX_UPLOAD_HEADER_BYTES = 16 * 1024;
@@ -244,6 +245,19 @@ async function route(
     await handleOpenExpectations(response, url, employeeContext, clinicalBackend, clock());
     return;
   }
+  if (path === REGISTRATION_TRIGGER_PATH) {
+    if (method !== "POST") {
+      sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
+      return;
+    }
+    if (url.search) {
+      sendJson(response, 400, { error: "INVALID_REGISTRATION_REQUEST", message: "Registration request is invalid." });
+      request.resume();
+      return;
+    }
+    await handleRegistrationTrigger(request, response, employeeContext, clinicalBackend, clock, bodyTimeoutMs, operationTimeoutMs);
+    return;
+  }
 
   if (method === "GET" && path === "/") {
     response.writeHead(302, { location: "/employee" });
@@ -289,12 +303,18 @@ async function route(
     return;
   }
   if (method === "POST" && path === "/api/employee/work-updates") {
+    if (clinicalBackend) {
+      request.resume();
+      sendJson(response, 409, {
+        error: "LEGACY_CLINICAL_COMMAND_DISABLED",
+        message: "Use the explicit registration or evidence command.",
+      });
+      return;
+    }
     const body = await jsonBody(request);
     rejectUnexpectedKeys(
       body,
-      clinicalBackend
-        ? ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text", "expectationId"]
-        : ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text"],
+      ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text"],
       "FORBIDDEN_EMPLOYEE_FIELDS",
     );
     const input = store.validateWorkUpdate(employeeContext, {
@@ -306,28 +326,7 @@ async function route(
       text: asString(body.text),
       now: clock(),
     });
-    if (!clinicalBackend) {
-      sendJson(response, 201, store.submitWorkUpdate(employeeContext, input));
-      return;
-    }
-    const idempotencyKey = requireIdempotencyKey(request.headers["idempotency-key"]);
-    const result = await clinicalBackend.submitWorkUpdate(employeeContext, {
-      kind: input.kind,
-      identityAnchor: input.identityAnchor,
-      workflowFamily: "EYE_EXAM",
-      occurredAt: input.occurredAt,
-      text: input.text,
-      expectationId: body.expectationId === undefined ? undefined : asString(body.expectationId),
-      idempotencyKey,
-      receivedAt: input.now,
-    });
-    store.appendWorkUpdateResult(
-      employeeContext,
-      input,
-      `${result.workflowId ?? "REVIEW_REQUIRED"} · ${result.expectationState ?? result.status}`,
-      idempotencyKey,
-    );
-    sendJson(response, 201, result);
+    sendJson(response, 201, store.submitWorkUpdate(employeeContext, input));
     return;
   }
   if (method === "GET" && path === "/api/manager/closures") {
@@ -416,6 +415,99 @@ async function handleOpenExpectations(
       }
     }
   }
+}
+
+type RegistrationTriggerBody = { identityAnchor: string; occurredAt: string };
+
+async function handleRegistrationTrigger(
+  request: IncomingMessage,
+  response: ServerResponse,
+  employeeContext: ActorContext,
+  clinicalBackend: ClinicalPreviewBackend | undefined,
+  clock: () => string,
+  bodyTimeoutMs: number,
+  operationTimeoutMs: number,
+): Promise<void> {
+  try {
+    assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
+    if (typeof clinicalBackend?.createRegistrationTrigger !== "function") {
+      throw new DomainError("PERSISTED_REGISTRATION_UNAVAILABLE", "Persisted registration is not configured.");
+    }
+    requireJsonContentType(request.headers["content-type"]);
+    const body = parseRegistrationTriggerBody(await readBody(request, bodyTimeoutMs));
+    const receivedAt = clock();
+    const occurredAt = parseStrictIsoInstant(body.occurredAt);
+    const received = parseStrictIsoInstant(receivedAt);
+    if (occurredAt === null || received === null || occurredAt > received) {
+      throw new DomainError("INVALID_REGISTRATION_REQUEST", "Registration request is invalid.");
+    }
+    const result = await withDeadline(clinicalBackend.createRegistrationTrigger(employeeContext, {
+      identityAnchor: body.identityAnchor,
+      occurredAt: body.occurredAt,
+      idempotencyKey: requireIdempotencyKey(request.headers["idempotency-key"]),
+      receivedAt,
+    }), operationTimeoutMs);
+    sendJson(response, 201, projectRegistrationTriggerResult(result));
+  } catch (error) {
+    const mapped = mapRegistrationError(error);
+    if (!response.writableEnded && !response.destroyed) sendJson(response, mapped.status, mapped.body);
+  }
+}
+
+function parseRegistrationTriggerBody(text: string): RegistrationTriggerBody {
+  let value: unknown;
+  try {
+    assertNoDuplicateJsonKeys(text);
+    value = JSON.parse(text);
+  } catch {
+    throw new DomainError("INVALID_REGISTRATION_REQUEST", "Registration request is invalid.");
+  }
+  if (!isPlainRecord(value) || !exactKeys(value, ["identityAnchor", "occurredAt"])) {
+    throw new DomainError("INVALID_REGISTRATION_REQUEST", "Registration request is invalid.");
+  }
+  const body = value as RegistrationTriggerBody;
+  if (typeof body.identityAnchor !== "string" || !/^DEMO-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.identityAnchor) ||
+      !isInstant(body.occurredAt)) {
+    throw new DomainError("INVALID_REGISTRATION_REQUEST", "Registration request is invalid.");
+  }
+  return structuredClone(body);
+}
+
+function projectRegistrationTriggerResult(value: unknown): Record<string, unknown> {
+  try {
+    const result = structuredClone(value) as Record<string, unknown>;
+    if (!isPlainRecord(result)) throw new Error();
+    if (result.status === "REVIEW_REQUIRED" && exactKeys(result, ["status"])) return { status: "REVIEW_REQUIRED" };
+    if (result.status === "COMPLETED" && exactKeys(result, ["expectationId", "expectationState", "status", "verificationStatus"]) &&
+        isBoundedId(result.expectationId) && ["OPEN", "UNMET"].includes(result.expectationState as string) && result.verificationStatus === "PENDING") {
+      return {
+        status: "COMPLETED",
+        expectationId: result.expectationId,
+        expectationState: result.expectationState,
+        verificationStatus: "PENDING",
+      };
+    }
+  } catch { /* map to bounded server error below */ }
+  throw new DomainError("INVALID_REGISTRATION_RESULT", "Registration result is invalid.");
+}
+
+function mapRegistrationError(error: unknown): { status: number; body: { error: string; message: string } } {
+  const code = error instanceof DomainError ? error.code : "INTERNAL_ERROR";
+  if (code === "PERSISTED_REGISTRATION_UNAVAILABLE") return publicError(503, code, "Persisted registration is unavailable.");
+  if (code === "INVALID_IDEMPOTENCY_KEY") return publicError(400, code, "Idempotency-Key is invalid.");
+  if (code === "UNSUPPORTED_CONTENT_TYPE") return publicError(415, code, "Content-Type is not supported.");
+  if (code === "REQUEST_TOO_LARGE") return publicError(413, code, "Request body is too large.");
+  if (code === "REQUEST_TIMEOUT") return publicError(504, code, "Request timed out; retry the exact command.");
+  if (["ARTIFACT_ID_CONFLICT", "FACT_CARD_ID_CONFLICT", "EXPECTATION_ID_CONFLICT"].includes(code)) {
+    return publicError(409, "REGISTRATION_CONFLICT", "Registration conflicts with an existing operation.");
+  }
+  if (["ROLE_SCOPE_VIOLATION", "TENANT_SCOPE_VIOLATION", "INVALID_ACTOR_CONTEXT", "FORBIDDEN"].includes(code)) {
+    return publicError(403, "FORBIDDEN", "The request is not permitted.");
+  }
+  if (["INVALID_REGISTRATION_REQUEST", "INVALID_CLINICAL_PREVIEW_INPUT", "INVALID_CLINICAL_PREVIEW_TIME"].includes(code)) {
+    return publicError(400, "INVALID_REGISTRATION_REQUEST", "Registration request is invalid.");
+  }
+  return publicError(500, "INTERNAL_ERROR", "Unexpected registration error.");
 }
 
 function parseOpenExpectationQuery(url: URL): { limit?: number; cursor?: string } {

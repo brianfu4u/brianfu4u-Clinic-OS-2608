@@ -85,7 +85,15 @@ function update(topicId: string, kind: "REGISTRATION" | "EXAM_REPORT", expectati
   };
 }
 
-test("hybrid PostgreSQL HTTP tracer persists through standard close and server restart", async () => {
+function registration(identityAnchor = "DEMO-001", occurredAt = "2026-08-30T09:00:00.000Z", key = "registration-0001") {
+  return {
+    method: "POST",
+    headers: { "idempotency-key": key },
+    body: JSON.stringify({ identityAnchor, occurredAt }),
+  } satisfies RequestInit;
+}
+
+test("durable registration creates the persisted trigger chain and survives restart", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
     const backend = new PostgresClinicalPreviewBackend(pool);
@@ -95,98 +103,46 @@ test("hybrid PostgreSQL HTTP tracer persists through standard close and server r
       assert.equal(health.body.mode, "hybrid-postgres-preview");
       assert.deepEqual(health.body.volatile, ["employee-status", "topics", "conversation", "browser-continuation"]);
       assert.match(await (await fetch(baseUrl + "/app.js")).text(), /PostgreSQL clinical chain is durable/);
-      const topicId = await prepare(baseUrl);
-      const registration = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "registration-0001" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      });
-      assert.equal(registration.response.status, 201);
-      assert.equal(registration.body.expectationState, "OPEN");
-      assert.equal(registration.body.verificationStatus, "PENDING");
-      expectationId = registration.body.expectationId;
-
-      const report = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "exam-report-0001" },
-        body: JSON.stringify(update(topicId, "EXAM_REPORT", expectationId)),
-      });
-      assert.equal(report.response.status, 201, JSON.stringify(report.body));
-      assert.equal(report.body.workflowId, registration.body.workflowId);
-      assert.equal(report.body.expectationState, "MET");
-      assert.equal(report.body.verificationStatus, "VERIFIED");
-
-      const closed = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": "manager-close-0001" },
-        body: JSON.stringify({ expectationId, action: "CLOSE_STANDARD", reasonCode: null, note: "private note" }),
-      });
-      assert.equal(closed.response.status, 201);
-      assert.equal(closed.body.workflowStatus, "CLOSED");
-      assert.doesNotMatch(JSON.stringify(closed.body), /private note|payload|sourceEmployeeId|fields/);
-
-      const changedAction = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": "manager-close-0001" },
-        body: JSON.stringify({ expectationId, action: "VOID", reasonCode: "PATIENT_CANCELLED", note: null }),
-      });
-      assert.equal(changedAction.body.error, "DECISION_ID_CONFLICT");
-      const audit = await pool.db.query<{ decided_at: string }>(
-        "SELECT decided_at::text FROM manager_decision WHERE expectation_id = $1",
-        [expectationId],
-      );
-      assert.equal(new Date(audit.rows[0].decided_at).toISOString(), NOW);
+      const registered = await json(baseUrl, "/api/employee/registration-trigger", registration());
+      assert.equal(registered.response.status, 201);
+      assert.equal(registered.body.expectationState, "OPEN");
+      assert.equal(registered.body.verificationStatus, "PENDING");
+      expectationId = registered.body.expectationId;
+      assert.deepEqual(Object.keys(registered.body).sort(), ["expectationId", "expectationState", "status", "verificationStatus"]);
+      const list = await json(baseUrl, "/api/employee/open-expectations?limit=25");
+      assert.equal(list.body.items[0].expectationId, expectationId);
+      assert.doesNotMatch(JSON.stringify(registered.body), /DEMO|artifact|workflow/i);
     });
 
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
-      const list = await json(baseUrl, "/api/manager/closures");
-      assert.equal(list.body.length, 1);
-      assert.equal(list.body[0].expectationId, expectationId);
-      assert.equal(list.body[0].workflowStatus, "CLOSED");
-      assert.equal(list.body[0].latestDecision.action, "CLOSE_STANDARD");
-      const replay = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": "manager-close-0001" },
-        body: JSON.stringify({ expectationId, action: "CLOSE_STANDARD", reasonCode: null, note: "private note" }),
-      });
-      assert.equal(replay.body.workflowStatus, "CLOSED");
-      assert.equal(new Date((await pool.db.query<{ decided_at: string }>(
-        "SELECT decided_at::text FROM manager_decision WHERE expectation_id = $1",
-        [expectationId],
-      )).rows[0].decided_at).toISOString(), NOW);
-    }, () => "2026-08-30T12:00:00.000Z");
+      const list = await json(baseUrl, "/api/employee/open-expectations?limit=25");
+      assert.equal(list.body.items[0].expectationId, expectationId);
+    }, () => "2026-08-30T09:11:00.000Z");
   } finally { await pool.close(); }
 });
 
-test("work-update replay is stable across clocks and changed kind with one key conflicts", async () => {
+test("registration replay is stable and changed identity under one key conflicts", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
     const backend = new PostgresClinicalPreviewBackend(pool);
     let first;
     await server(backend, async (baseUrl) => {
-      const topicId = await prepare(baseUrl);
-      first = (await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "stable-clock-key" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      })).body;
+      first = (await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "stable-clock-key"))).body;
       const audit = await pool.db.query<{ created_at: string }>(
-        "SELECT created_at::text FROM artifact WHERE id = $1",
-        [first.artifactId],
+        "SELECT created_at::text FROM artifact",
       );
       assert.equal(new Date(audit.rows[0].created_at).toISOString(), NOW);
     });
     await server(backend, async (baseUrl) => {
-      const topicId = await prepare(baseUrl);
-      const replay = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "stable-clock-key" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      });
+      const replay = await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "stable-clock-key"));
       assert.deepEqual(replay.body, first);
       assert.equal(new Date((await pool.db.query<{ created_at: string }>(
-        "SELECT created_at::text FROM artifact WHERE id = $1",
-        [first.artifactId],
+        "SELECT created_at::text FROM artifact",
       )).rows[0].created_at).toISOString(), NOW);
-      const changedKind = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "stable-clock-key" },
-        body: JSON.stringify(update(topicId, "EXAM_REPORT", first.expectationId)),
-      });
-      assert.equal(changedKind.body.error, "ARTIFACT_ID_CONFLICT");
-    }, () => "2026-08-30T12:00:00.000Z");
+      const changed = await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-002", "2026-08-30T09:00:00.000Z", "stable-clock-key"));
+      assert.equal(changed.response.status, 409);
+      assert.equal(changed.body.error, "REGISTRATION_CONFLICT");
+    }, () => "2026-08-30T09:11:00.000Z");
   } finally { await pool.close(); }
 });
 
@@ -201,16 +157,13 @@ test("closure GET is read-only and ordinary chat never acquires PostgreSQL", asy
       });
       assert.equal(pool.acquisitions, before);
 
-      const registration = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "registration-0002" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      });
+      const registered = await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "registration-0002"));
       const first = (await json(baseUrl, "/api/manager/closures")).body[0];
       const second = (await json(baseUrl, "/api/manager/closures")).body[0];
       assert.equal(first.expectationState, "OPEN");
       assert.deepEqual(second, first);
       assert.doesNotMatch(JSON.stringify(second), /ordinary private sentinel/);
-      assert.equal(registration.body.expectationState, "OPEN");
+      assert.equal(registered.body.expectationState, "OPEN");
     });
   } finally { await pool.close(); }
 });
@@ -219,11 +172,7 @@ test("employee open-expectations endpoint is server-scoped, safe, and synthetic-
   const pool = new Pool(); await pool.migrate();
   try {
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
-      const topicId = await prepare(baseUrl);
-      await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "open-expectation-registration" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      });
+      await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "open-expectation-registration"));
       const listed = await json(baseUrl, "/api/employee/open-expectations?limit=1");
       assert.equal(listed.response.status, 200);
       assert.equal(listed.body.items.length, 1);
@@ -242,35 +191,25 @@ test("employee open-expectations endpoint is server-scoped, safe, and synthetic-
   } finally { await pool.close(); }
 });
 
-test("formal validation and idempotency fail before acquisition; DB failure appends no message", async () => {
+test("registration validation fails before acquisition; durable failures append no message", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl, store) => {
-      const topicId = (await json(baseUrl, "/api/employee/topics", {
-        method: "POST", body: JSON.stringify({ title: "still off duty" }),
-      })).body.id;
       const before = pool.acquisitions;
-      const offDuty = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", headers: { "idempotency-key": "registration-0003" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      });
-      assert.equal(offDuty.body.error, "EMPLOYEE_NOT_ON_DUTY");
-      assert.equal(pool.acquisitions, before);
-      await json(baseUrl, "/api/employee/status", { method: "PUT", body: JSON.stringify({ status: "ON_DUTY" }) });
-      const missingKey = await json(baseUrl, "/api/employee/work-updates", {
-        method: "POST", body: JSON.stringify(update(topicId, "REGISTRATION")),
+      const missingKey = await json(baseUrl, "/api/employee/registration-trigger", {
+        method: "POST", body: JSON.stringify({ identityAnchor: "DEMO-001", occurredAt: "2026-08-30T09:00:00.000Z" }),
       });
       assert.equal(missingKey.body.error, "INVALID_IDEMPOTENCY_KEY");
       assert.equal(pool.acquisitions, before);
       assert.equal(store.bootstrap(EMPLOYEE).messages.length, 0);
 
       for (const body of [
-        { ...update(topicId, "REGISTRATION"), expectationId: "injected" },
-        update(topicId, "EXAM_REPORT"),
-        { ...update(topicId, "REGISTRATION"), occurredAt: "2026-08-30T10:00:00.000Z" },
+        { identityAnchor: "DEMO-001", occurredAt: "2026-08-30T09:00:00.000Z", expectationId: "injected" },
+        { identityAnchor: "DEMO-001 ", occurredAt: "2026-08-30T09:00:00.000Z" },
+        { identityAnchor: "DEMO-001", occurredAt: "2026-08-30T10:00:00.000Z" },
       ]) {
-        const rejected = await json(baseUrl, "/api/employee/work-updates", {
-          method: "POST", headers: { "idempotency-key": `preflight-${body.kind}-${body.occurredAt}` },
+        const rejected = await json(baseUrl, "/api/employee/registration-trigger", {
+          method: "POST", headers: { "idempotency-key": `preflight-${body.occurredAt}` },
           body: JSON.stringify(body),
         });
         assert.equal(rejected.response.status, 400);
@@ -287,19 +226,42 @@ test("formal validation and idempotency fail before acquisition; DB failure appe
   } finally { await pool.close(); }
 
   const failing: ClinicalPreviewBackend = {
-    async submitWorkUpdate() { throw new Error("database unavailable"); },
+    async createRegistrationTrigger() { throw new Error("database unavailable"); },
     async listManagerClosures() { return []; },
     async submitManagerDecision() { throw new Error("unused"); },
   };
   await server(failing, async (baseUrl, store) => {
-    const topicId = await prepare(baseUrl);
-    const failed = await json(baseUrl, "/api/employee/work-updates", {
-      method: "POST", headers: { "idempotency-key": "registration-0004" },
-      body: JSON.stringify(update(topicId, "REGISTRATION")),
-    });
+    const failed = await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "registration-0004"));
     assert.equal(failed.response.status, 500);
     assert.equal(store.bootstrap(EMPLOYEE).messages.length, 0);
   });
+});
+
+test("registration route is exact-body, query-free, and unavailable in synthetic preview", async () => {
+  const pool = new Pool(); await pool.migrate();
+  try {
+    await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
+      const before = pool.acquisitions;
+      for (const [path, options] of [
+        ["/api/employee/registration-trigger?clinicId=other", registration()] as const,
+        ["/api/employee/registration-trigger", { method: "POST", headers: { "idempotency-key": "duplicate-0001" }, body: '{"identityAnchor":"DEMO-001","identityAnchor":"DEMO-002","occurredAt":"2026-08-30T09:00:00.000Z"}' }] as const,
+        ["/api/employee/registration-trigger", { method: "POST", headers: { "idempotency-key": "content-type-0001", "content-type": "text/plain" }, body: "not json" }] as const,
+      ]) {
+        const result = await json(baseUrl, path, options);
+        assert.ok(result.response.status >= 400);
+        assert.deepEqual(Object.keys(result.body).sort(), ["error", "message"]);
+        assert.equal(pool.acquisitions, before);
+      }
+    });
+    const synthetic = createPreviewServer();
+    await new Promise<void>((resolve) => synthetic.listen(0, "127.0.0.1", resolve));
+    try {
+      const result = await json(`http://127.0.0.1:${(synthetic.address() as AddressInfo).port}`, "/api/employee/registration-trigger", registration());
+      assert.equal(result.response.status, 503);
+      assert.equal(result.body.error, "PERSISTED_REGISTRATION_UNAVAILABLE");
+      assert.deepEqual((await json(`http://127.0.0.1:${(synthetic.address() as AddressInfo).port}`, "/api/employee/open-expectations")).body, { items: [], nextCursor: null });
+    } finally { await new Promise<void>((resolve) => synthetic.close(() => resolve())); }
+  } finally { await pool.close(); }
 });
 
 test("legacy postgres preview and root aliases are rejected without fallback", () => {
@@ -371,36 +333,33 @@ test("configured startup validates all frozen OCR assets before creating the poo
   );
 });
 
-test("exact keys replay once locally, conflicting content, injected authority and workflow-only decisions fail closed", async () => {
+test("registration replay, spoofed authority, and legacy persistent writes fail closed", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl, store) => {
-      const topicId = await prepare(baseUrl);
-      const request = {
-        method: "POST", headers: { "idempotency-key": "registration-0005" },
-        body: JSON.stringify(update(topicId, "REGISTRATION")),
-      };
-      const first = await json(baseUrl, "/api/employee/work-updates", request);
-      const replay = await json(baseUrl, "/api/employee/work-updates", request);
+      const request = registration("DEMO-001", "2026-08-30T09:00:00.000Z", "registration-0005");
+      const first = await json(baseUrl, "/api/employee/registration-trigger", request);
+      const replay = await json(baseUrl, "/api/employee/registration-trigger", request);
       assert.deepEqual(replay.body, first.body);
-      assert.equal(store.bootstrap(EMPLOYEE).messages.length, 2);
+      assert.equal(store.bootstrap(EMPLOYEE).messages.length, 0);
 
-      const conflict = await json(baseUrl, "/api/employee/work-updates", {
-        ...request, body: JSON.stringify({ ...update(topicId, "REGISTRATION"), text: "different" }),
-      });
-      assert.equal(conflict.response.status, 400);
-      assert.equal(conflict.body.error, "ARTIFACT_ID_CONFLICT");
+      const conflict = await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-002", "2026-08-30T09:00:00.000Z", "registration-0005"));
+      assert.equal(conflict.response.status, 409);
+      assert.equal(conflict.body.error, "REGISTRATION_CONFLICT");
 
-      const injected = await json(baseUrl, "/api/employee/work-updates", {
-        ...request,
-        headers: { "idempotency-key": "registration-0006" },
-        body: JSON.stringify({ ...update(topicId, "REGISTRATION"), clinicId: "other-clinic" }),
+      const injected = await json(baseUrl, "/api/employee/registration-trigger", {
+        method: "POST", headers: { "idempotency-key": "registration-0006" },
+        body: JSON.stringify({ identityAnchor: "DEMO-001", occurredAt: "2026-08-30T09:00:00.000Z", clinicId: "other-clinic" }),
       });
-      assert.equal(injected.body.error, "FORBIDDEN_EMPLOYEE_FIELDS");
+      assert.equal(injected.body.error, "INVALID_REGISTRATION_REQUEST");
+
+      const legacy = await json(baseUrl, "/api/employee/work-updates", request);
+      assert.equal(legacy.response.status, 409);
+      assert.equal(legacy.body.error, "LEGACY_CLINICAL_COMMAND_DISABLED");
 
       const workflowOnly = await json(baseUrl, "/api/manager/decisions", {
         method: "POST", headers: { "idempotency-key": "manager-close-0002" },
-        body: JSON.stringify({ workflowId: first.body.workflowId, action: "CLOSE_STANDARD", reasonCode: null, note: null }),
+        body: JSON.stringify({ workflowId: "workflow:forbidden", action: "CLOSE_STANDARD", reasonCode: null, note: null }),
       });
       assert.equal(workflowOnly.body.error, "FORBIDDEN_MANAGER_FIELDS");
     });
@@ -414,4 +373,7 @@ test("browser retains pending keys until success, clears them on edit, and gates
   assert.match(source, /pendingDecisionKeys\.get\(resourceId\) \|\| crypto\.randomUUID\(\)/);
   assert.match(source, /form\.addEventListener\("input", clear\)/);
   assert.match(source, /item\.verificationStatus === "VERIFIED" \? \["CLOSE_STANDARD", "VOID"\] : \["VOID"\]/);
+  assert.match(source, /postgresClinical \? "\/api\/employee\/registration-trigger" : "\/api\/employee\/work-updates"/);
+  assert.match(source, /await loadOpenExpectations\(form\)/);
+  assert.doesNotMatch(source, /localStorage\.(?:setItem|getItem)\([^)]*(?:expectation|registration|identity)/i);
 });

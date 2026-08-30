@@ -28,25 +28,16 @@ import type {
 } from "../application/evidence-object-ingestion.ts";
 import type { StoredObjectRef } from "../storage/contracts.ts";
 
-export interface ClinicalWorkUpdateInput {
-  kind: "REGISTRATION" | "EXAM_REPORT";
+export interface ClinicalRegistrationTriggerInput {
   identityAnchor: string;
-  workflowFamily: "EYE_EXAM";
   occurredAt: string;
-  text: string;
-  expectationId?: string;
   idempotencyKey: string;
   receivedAt: string;
 }
 
-export interface ClinicalWorkUpdateResult {
-  status: "COMPLETED" | "REVIEW_REQUIRED";
-  artifactId: string;
-  workflowId: string | null;
-  expectationId: string | null;
-  expectationState: string | null;
-  verificationStatus: string | null;
-}
+export type ClinicalRegistrationTriggerResult =
+  | { status: "COMPLETED"; expectationId: string; expectationState: "OPEN" | "UNMET"; verificationStatus: "PENDING" }
+  | { status: "REVIEW_REQUIRED" };
 
 export interface ClinicalManagerDecisionInput {
   expectationId: string;
@@ -62,7 +53,10 @@ export interface ClinicalPreviewBackend {
     context: ActorContext,
     query: EmployeeOpenExpectationQuery,
   ): Promise<EmployeeOpenExpectationPage>;
-  submitWorkUpdate(context: ActorContext, input: ClinicalWorkUpdateInput): Promise<ClinicalWorkUpdateResult>;
+  createRegistrationTrigger?(
+    context: ActorContext,
+    input: ClinicalRegistrationTriggerInput,
+  ): Promise<ClinicalRegistrationTriggerResult>;
   submitExamReportConsequence?(
     context: ActorContext,
     command: ProcessGoldenPathCommand,
@@ -138,37 +132,35 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     return this.#extractionPath.processGoldenPath(context, command);
   }
 
-  async submitWorkUpdate(
+  async createRegistrationTrigger(
     context: ActorContext,
-    rawInput: ClinicalWorkUpdateInput,
-  ): Promise<ClinicalWorkUpdateResult> {
+    rawInput: ClinicalRegistrationTriggerInput,
+  ): Promise<ClinicalRegistrationTriggerResult> {
     assertActorAccess(context, context.clinicId, "EMPLOYEE");
     const input = structuredClone(rawInput);
+    requireExactRegistrationInput(input);
     requireKey(input.idempotencyKey);
     const occurredAt = parseStrictIsoInstant(input.occurredAt);
     const receivedAt = parseStrictIsoInstant(input.receivedAt);
     if (occurredAt === null || receivedAt === null || occurredAt > receivedAt) {
       throw new DomainError("INVALID_CLINICAL_PREVIEW_TIME", "Occurrence must not be later than receipt.");
     }
-    if (input.workflowFamily !== "EYE_EXAM" || !input.identityAnchor.startsWith("DEMO-")) {
+    if (!isExactDemoAnchor(input.identityAnchor)) {
       throw new DomainError("INVALID_CLINICAL_PREVIEW_INPUT", "Only synthetic EYE_EXAM data is accepted.");
     }
-    if (input.kind === "REGISTRATION" && input.expectationId !== undefined) {
-      throw new DomainError("FORBIDDEN_EXPECTATION_ID", "Registration creates its server-derived Expectation ID.");
-    }
-    if (input.kind === "EXAM_REPORT") requireExpectationId(input.expectationId);
     const artifactId = stableId("artifact", context, input.idempotencyKey);
     const existingArtifact = await this.#capture.getArtifact(context, artifactId);
+    let operationAt = existingArtifact?.createdAt ?? input.receivedAt;
     const artifact: Artifact = {
       id: artifactId,
       clinicId: context.clinicId,
-      kind: input.kind,
+      kind: "REGISTRATION",
       occurredAt: input.occurredAt,
       occurredAtSource: "employee_confirmed",
       sourceEmployeeId: context.actorId,
       identityAnchor: input.identityAnchor,
-      payload: { text: input.text, synthetic: true },
-      createdAt: existingArtifact?.createdAt ?? input.receivedAt,
+      payload: { previewRegistration: true },
+      createdAt: operationAt,
     };
     const factCard: EvidenceFactCard = {
       id: stableId("fact", context, input.idempotencyKey),
@@ -178,15 +170,13 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       identityAnchor: input.identityAnchor,
       workflowFamily: "EYE_EXAM",
       occurredAt: input.occurredAt,
-      fields: { kind: input.kind, synthetic: true },
+      fields: { previewRegistration: true },
       missingFields: [],
       confidence: 1,
-      parserVersion: "preview-deterministic-1",
+      parserVersion: "preview-registration-trigger-1",
       lineageArtifactIds: [artifactId],
     };
-    const attachedAt = input.occurredAt;
-    const run = () => input.kind === "REGISTRATION"
-      ? this.#path.recordTrigger(context, {
+    const run = () => this.#path.recordTrigger(context, {
           artifact,
           factCard,
           expectation: {
@@ -196,15 +186,8 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
             triggeredAt: input.occurredAt,
             dueAt: new Date(Date.parse(input.occurredAt) + 15 * 60_000).toISOString(),
           },
-          attachedAt,
-          evaluatedAt: input.occurredAt,
-        })
-      : this.#path.recordConsequence(context, {
-          artifact,
-          factCard,
-          expectationId: requireExpectationId(input.expectationId),
-          attachedAt,
-          evaluatedAt: input.occurredAt,
+          attachedAt: operationAt,
+          evaluatedAt: operationAt,
         });
     let result;
     try {
@@ -214,26 +197,22 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       const racedArtifact = await this.#capture.getArtifact(context, artifactId);
       if (!racedArtifact) throw error;
       artifact.createdAt = racedArtifact.createdAt;
+      operationAt = racedArtifact.createdAt;
       result = await run();
     }
 
     if (result.status === "REVIEW_REQUIRED") {
-      return structuredClone({
-        status: result.status,
-        artifactId,
-        workflowId: null,
-        expectationId: null,
-        expectationState: null,
-        verificationStatus: null,
-      });
+      return { status: "REVIEW_REQUIRED" };
+    }
+    const expectationState = result.expectation.expectation.state;
+    if ((expectationState !== "OPEN" && expectationState !== "UNMET") || result.verification.result.status !== "PENDING") {
+      throw new DomainError("INVALID_REGISTRATION_RESULT", "Registration did not establish a valid pending expectation.");
     }
     return structuredClone({
-      status: result.status,
-      artifactId,
-      workflowId: result.attachment.workflow.id,
+      status: "COMPLETED" as const,
       expectationId: result.expectation.expectation.id,
-      expectationState: result.expectation.expectation.state,
-      verificationStatus: result.verification.result.status,
+      expectationState,
+      verificationStatus: "PENDING" as const,
     });
   }
 
@@ -285,11 +264,14 @@ function requireKey(value: unknown): asserts value is string {
   }
 }
 
-function requireExpectationId(value: unknown): string {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new DomainError("EXPECTATION_ID_REQUIRED", "A server-issued Expectation ID is required.");
+function requireExactRegistrationInput(value: ClinicalRegistrationTriggerInput): void {
+  if (Object.keys(value).sort().join("|") !== "idempotencyKey|identityAnchor|occurredAt|receivedAt") {
+    throw new DomainError("INVALID_CLINICAL_PREVIEW_INPUT", "Registration command is invalid.");
   }
-  return value;
+}
+
+function isExactDemoAnchor(value: unknown): value is string {
+  return typeof value === "string" && /^DEMO-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
 }
 
 function stableId(
