@@ -22,14 +22,21 @@ Open `http://127.0.0.1:3000/employee` for the employee preview or
 `http://127.0.0.1:3000/manager` for the manager preview. The implementation
 uses in-memory synthetic data by default and is not a production application.
 
-To run the hybrid preview against an already migrated PostgreSQL database:
+To run the persisted local preview against an already migrated PostgreSQL database,
+configure all local extraction dependencies explicitly:
 
 ```bash
-PREVIEW_MODE=postgres DATABASE_URL='postgresql://...' npm run preview
+PREVIEW_MODE=postgres \
+DATABASE_URL='postgresql://...' \
+PREVIEW_OBJECT_STORE_ROOT='/var/lib/clinic-os/objects' \
+WO021_TESSERACT_PATH='/usr/bin/tesseract' \
+WO021_TESSDATA_DIR='/usr/share/tesseract-ocr/5/tessdata' \
+npm run preview
 ```
 
-This startup path does not run migrations. A missing `DATABASE_URL` fails startup and
-never falls back to the in-memory clinical backend.
+This startup path does not run migrations. A missing database URL, local object-store root,
+or OCR path fails startup and never falls back to the in-memory clinical backend. The persisted
+extraction route is therefore never advertised by a server that only has a database pool.
 
 ## PostgreSQL acceptance boundary
 

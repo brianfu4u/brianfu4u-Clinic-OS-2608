@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -6,8 +7,28 @@ import { DomainError } from "../domain/errors.ts";
 import type { ActorContext, ManagerDecisionAction } from "../domain/contracts.ts";
 import { assertActorAccess, assertActorContext } from "../domain/access-context.ts";
 import type { ProcessGoldenPathCommand, ProcessGoldenPathResult } from "../application/extraction-golden-path.ts";
+import {
+  EYE_EXAM_EXTRACTION_SPEC,
+  StoredEvidenceExtractionService,
+} from "../application/evidence-extraction.ts";
+import { ExtractionGoldenPath } from "../application/extraction-golden-path.ts";
+import { PersistedGoldenPath } from "../application/persisted-golden-path.ts";
+import { ExtractionPersistenceRepository } from "../persistence/extraction-persistence-repository.ts";
+import { CaptureRepository } from "../persistence/capture-repository.ts";
+import { ExpectationRepository } from "../persistence/expectation-repository.ts";
+import { VerificationRepository } from "../persistence/verification-repository.ts";
+import { WorkflowAttachRepository } from "../persistence/workflow-attach-repository.ts";
 import { createNodePgPool } from "../persistence/node-pg-pool.ts";
 import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
+import { InferenceGateway } from "../runtime/inference-gateway.ts";
+import type { RuntimeManifest } from "../runtime/contracts.ts";
+import {
+  TESSERACT_MODEL_MANIFEST_SHA256,
+  TESSERACT_OCR_MODEL_ID,
+  TesseractOcrProvider,
+} from "../runtime/tesseract-ocr-provider.ts";
+import { LocalObjectStore } from "../storage/local-object-store.ts";
+import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
 import { PreviewStore, type EmployeeStatus } from "./preview-store.ts";
 import type { ClinicalPreviewBackend } from "./clinical-preview-backend.ts";
 import { PostgresClinicalPreviewBackend, requireIdempotencyKey } from "./clinical-preview-backend.ts";
@@ -83,10 +104,59 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   if (mode === "synthetic") return createPreviewServer();
   if (mode !== "postgres") throw new Error("INVALID_PREVIEW_MODE");
   if (!env.DATABASE_URL?.trim()) throw new Error("DATABASE_URL_REQUIRED");
+  const objectStoreRoot = requiredAbsolutePath(
+    env.PREVIEW_OBJECT_STORE_ROOT ?? env.LOCAL_OBJECT_STORE_ROOT ?? env.OBJECT_STORE_ROOT,
+    "OBJECT_STORE_ROOT_REQUIRED",
+  );
+  const executablePath = requiredAbsolutePath(env.WO021_TESSERACT_PATH, "TESSERACT_PATH_REQUIRED");
+  const tessdataDir = requiredAbsolutePath(env.WO021_TESSDATA_DIR, "TESSDATA_DIR_REQUIRED");
   const pool = createNodePgPool(env.DATABASE_URL);
-  const server = createPreviewServer({ clinicalBackend: new PostgresClinicalPreviewBackend(pool) });
+  const runtime: RuntimeManifest = {
+    profile: "ON_PREM_STRICT",
+    databaseProvider: "LOCAL_POSTGRES",
+    fileProvider: "LOCAL_OBJECT_STORE",
+    inferenceProvider: "LOCAL_MODEL",
+    backupProvider: "LOCAL_ENCRYPTED_BACKUP",
+    externalInferenceAuthorized: false,
+    manifestVersion: "preview-postgres-local-v1",
+  };
+  const spec = {
+    ...EYE_EXAM_EXTRACTION_SPEC,
+    parserVersion: "tesseract-eng-parser-v1",
+    modelId: TESSERACT_OCR_MODEL_ID,
+    modelManifestSha256: TESSERACT_MODEL_MANIFEST_SHA256,
+  } as const;
+  const objects = new ObjectStoreGateway(runtime, new LocalObjectStore(objectStoreRoot));
+  const inference = new InferenceGateway(runtime, new TesseractOcrProvider({
+    executablePath,
+    tessdataDir,
+  }));
+  const capture = new CaptureRepository(pool);
+  const persistedPath = new PersistedGoldenPath({
+    capture,
+    attach: new WorkflowAttachRepository(pool),
+    expectation: new ExpectationRepository(pool),
+    verification: new VerificationRepository(pool),
+  });
+  const extractionPath = new ExtractionGoldenPath({
+    extractor: new StoredEvidenceExtractionService({ objects, inference, spec }),
+    persistence: new ExtractionPersistenceRepository(pool, spec),
+    goldenPath: persistedPath,
+  });
+  const server = createPreviewServer({
+    clinicalBackend: new PostgresClinicalPreviewBackend(pool, { extractionGoldenPath: extractionPath }),
+  });
   server.once("close", () => { void pool.close(); });
   return server;
+}
+
+function requiredAbsolutePath(value: string | undefined, code: string): string {
+  if (!value?.trim()) throw new Error(code);
+  const path = value.trim();
+  if (!isAbsolute(path) || resolve(path) !== path || dirname(path) === path) {
+    throw new Error(`${code}:INVALID_ABSOLUTE_PATH`);
+  }
+  return path;
 }
 
 async function route(

@@ -279,6 +279,28 @@ test("explicit postgres startup profile requires configuration and never falls b
     /DATABASE_URL_REQUIRED/,
   );
   assert.throws(
+    () => createConfiguredPreviewServer({ PREVIEW_MODE: "postgres", DATABASE_URL: "postgresql://localhost/clinic" }),
+    /OBJECT_STORE_ROOT_REQUIRED/,
+  );
+  assert.throws(
+    () => createConfiguredPreviewServer({
+      PREVIEW_MODE: "postgres",
+      DATABASE_URL: "postgresql://localhost/clinic",
+      PREVIEW_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
+    }),
+    /TESSERACT_PATH_REQUIRED/,
+  );
+  assert.throws(
+    () => createConfiguredPreviewServer({
+      PREVIEW_MODE: "postgres",
+      DATABASE_URL: "postgresql://localhost/clinic",
+      PREVIEW_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
+      WO021_TESSERACT_PATH: "relative/tesseract",
+      WO021_TESSDATA_DIR: "/var/lib/clinic-os/tessdata",
+    }),
+    /TESSERACT_PATH_REQUIRED:INVALID_ABSOLUTE_PATH/,
+  );
+  assert.throws(
     () => createConfiguredPreviewServer({ PREVIEW_MODE: "unknown" }),
     /INVALID_PREVIEW_MODE/,
   );
