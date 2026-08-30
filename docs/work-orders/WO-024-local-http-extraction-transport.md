@@ -1,6 +1,6 @@
 # WO-024 — Local HTTP Extraction Transport
 
-**Status:** ARCHITECTURE FROZEN / BUILDER READY  
+**Status:** Accepted — Architecture Review passed 2026-08-30  
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -369,3 +369,21 @@ Review must inspect implementation, not only tests, for:
 - tenant isolation at the configured backend and manager read reuse;
 - no synthetic/PGlite/database fallback in the persisted profile;
 - no hidden upload, UI, queue, authentication or cloud scope.
+
+## Architecture acceptance
+
+Accepted after commits `92bd1a1`, `1ccd2cb`, `a33a8a7`, and `06fe46b`, followed by independent
+review.
+
+- Full regression: 322/322.
+- HTTP/Postgres/OCR focused checks: 21/21.
+- Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- Postgres Preview startup validates the complete OCR asset and checked-in manifest trust chain
+  before creating the server; synthetic preview remains independent.
+- The current workspace has a 0777 `/workspace` ancestor, so secure Postgres Preview correctly
+  rejects it with `OCR_MODEL_INTEGRITY_FAILED`; deployment must use a protected path such as
+  `/opt/clinic-os-2608`.
+- GitHub push remains deferred for the batch release.
