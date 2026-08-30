@@ -11,6 +11,7 @@ import {
 import type { RuntimeManifest } from "./contracts.ts";
 import { validateRuntimeManifest } from "./manifest-validator.ts";
 import { createNodePgPool, type NodePgPool } from "../persistence/node-pg-pool.ts";
+import { isRepositorySchemaCompatible } from "../persistence/migration-runner.ts";
 import { InferenceGateway } from "./inference-gateway.ts";
 import { TesseractOcrProvider } from "./tesseract-ocr-provider.ts";
 import { LocalObjectStore } from "../storage/local-object-store.ts";
@@ -209,7 +210,7 @@ export function createConfiguredLocalRuntime(config: StartupConfig): ConfiguredL
     readinessProbes: Object.freeze({
       database: async () => {
         const connection = await pool.connect();
-        try { await connection.query("SELECT 1"); return true; } finally { connection.release(); }
+        try { return await isRepositorySchemaCompatible(connection); } finally { connection.release(); }
       },
       objectStore: async () => {
         const { access } = await import("node:fs/promises");

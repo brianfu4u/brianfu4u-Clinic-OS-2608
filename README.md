@@ -47,6 +47,10 @@ extraction route is therefore never advertised by a server that only has a datab
 
 `GET /api/health` confirms only that the HTTP process is alive. `GET /api/readiness` is the
 dependency gate; it returns bounded stable codes and `503` until every selected adapter is ready.
+For a configured local runtime, database readiness requires an exact read-only match between the
+checked-in migration checksums and the existing `schema_migration` ledger: a reachable but empty,
+stale, changed, or unknown schema is not ready. Startup never runs migrations; use the explicit
+administrative `npm run db:migrate` command before starting the service.
 Cloud declarations are validated but deliberately return `CLOUD_PROVIDER_UNAVAILABLE` in this
 repository: cloud providers have not yet been implemented. No URL, credential, endpoint, or local
 path is included in either response. Legacy `PREVIEW_MODE=postgres` and old object-root names are

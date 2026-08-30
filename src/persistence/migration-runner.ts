@@ -83,6 +83,36 @@ export async function applyMigrations(
   return applied;
 }
 
+/**
+ * Read-only compatibility guard for an already-migrated application database.
+ * Startup must never create the ledger or apply a migration: deployment
+ * operators perform that explicit action with the separate migration command.
+ */
+export async function isRepositorySchemaCompatible(client: SqlClient): Promise<boolean> {
+  try {
+    const migrations = validateMigrations(await loadRepositoryMigrations());
+    const expected = new Map(migrations.map((migration) => [
+      migration.id,
+      createHash("sha256").update(migration.sql).digest("hex"),
+    ]));
+    const result = await client.query("SELECT id, checksum FROM schema_migration");
+    if (result.rows.length !== expected.size) return false;
+
+    const seen = new Set<string>();
+    for (const row of result.rows) {
+      const id = typeof row.id === "string" ? row.id : "";
+      const checksum = typeof row.checksum === "string" ? row.checksum : "";
+      if (seen.has(id) || expected.get(id) !== checksum) return false;
+      seen.add(id);
+    }
+    return seen.size === expected.size;
+  } catch {
+    // Driver/schema/filesystem errors are deliberately reduced to one bounded
+    // readiness fact by the caller. Never leak database or migration details.
+    return false;
+  }
+}
+
 function validateMigrations(migrations: readonly Migration[]): Migration[] {
   const seen = new Set<string>();
   for (const migration of migrations) {

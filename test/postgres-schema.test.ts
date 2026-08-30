@@ -5,6 +5,7 @@ import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import {
   applyMigrations,
+  isRepositorySchemaCompatible,
   loadRepositoryMigrations,
   MigrationError,
 } from "../src/persistence/migration-runner.ts";
@@ -141,6 +142,40 @@ test("identical migration rerun is a no-op", async () => {
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
     assert.equal(ledger.rows.length, 7);
+  } finally {
+    await db.close();
+  }
+});
+
+test("repository schema compatibility accepts only the exact read-only migration ledger", async () => {
+  const db = await migratedDb();
+  try {
+    assert.equal(await isRepositorySchemaCompatible(db), true);
+    await db.query("UPDATE schema_migration SET checksum = '0' || substr(checksum, 2) WHERE id = '0001_trusted_core'");
+    assert.equal(await isRepositorySchemaCompatible(db), false);
+  } finally {
+    await db.close();
+  }
+});
+
+test("repository schema compatibility fails closed without creating a migration ledger", async () => {
+  const db = new PGlite();
+  try {
+    assert.equal(await isRepositorySchemaCompatible(db), false);
+    const ledger = await db.query("SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'schema_migration'");
+    assert.equal(ledger.rows.length, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test("repository schema compatibility rejects missing and unknown migration entries", async () => {
+  const db = await migratedDb();
+  try {
+    await db.query("DELETE FROM schema_migration WHERE id = '0007_extraction_operation_identity'");
+    assert.equal(await isRepositorySchemaCompatible(db), false);
+    await db.query("INSERT INTO schema_migration (id, checksum) VALUES ('9999_unknown', repeat('a', 64))");
+    assert.equal(await isRepositorySchemaCompatible(db), false);
   } finally {
     await db.close();
   }
