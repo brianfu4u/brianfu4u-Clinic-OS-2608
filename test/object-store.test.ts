@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdtemp, mkdir, rm, symlink, truncate } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, rename, rm, symlink, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -163,6 +163,50 @@ test("local root and tenant directories are hardened to 0700 and broad root is r
   assert.equal((await lstat(tenant)).mode & 0o777, 0o700);
   const file = join(tenant, digest("object:permissions"));
   assert.equal((await lstat(file)).mode & 0o777, 0o600);
+});
+
+test("directory identity swap after open fails without writing outside", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "clinic-os-swap-parent-"));
+  const root = join(parent, "store");
+  const displaced = join(parent, "displaced");
+  const outside = await mkdtemp(join(tmpdir(), "clinic-os-swap-outside-"));
+  await mkdir(root, { mode: 0o700 });
+  t.after(() => Promise.all([
+    rm(parent, { recursive: true, force: true }),
+    rm(outside, { recursive: true, force: true }),
+  ]));
+  let swapped = false;
+  const provider = new LocalObjectStore(root, {
+    afterDirectoryOpen: async (path) => {
+      if (swapped || path !== root) return;
+      swapped = true;
+      await rename(root, displaced);
+      await symlink(outside, root);
+    },
+  });
+  const gateway = new ObjectStoreGateway(strict(), provider);
+  await assert.rejects(
+    gateway.put(CONTEXT, { objectId: "swap", mediaType: "image/png", bytes: BYTES }),
+    hasCode("OBJECT_STORE_PROVIDER_FAILED"),
+  );
+  assert.equal(swapped, true);
+  assert.deepEqual(await readFileNames(outside), []);
+});
+
+test("non-sticky writable root parent fails closed", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "clinic-os-unsafe-parent-"));
+  const root = join(parent, "store");
+  await mkdir(root, { mode: 0o700 });
+  await chmod(parent, 0o777);
+  t.after(async () => {
+    await chmod(parent, 0o700).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true });
+  });
+  const gateway = new ObjectStoreGateway(strict(), new LocalObjectStore(root));
+  await assert.rejects(
+    gateway.put(CONTEXT, { objectId: "unsafe-parent", mediaType: "image/png", bytes: BYTES }),
+    hasCode("OBJECT_STORE_PROVIDER_FAILED"),
+  );
 });
 
 test("on-disk truncation is detected on get", async (t) => {

@@ -1,5 +1,5 @@
-import { constants } from "node:fs";
-import { link, mkdir, open, realpath, unlink, writeFile } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { link, lstat, mkdir, open, realpath, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -19,8 +19,9 @@ export class LocalObjectStore implements ObjectStoreProvider {
   readonly kind = "LOCAL_OBJECT_STORE" as const;
   readonly #root: string;
   readonly #ready: Promise<string>;
+  readonly #afterDirectoryOpen?: (path: string) => void | Promise<void>;
 
-  constructor(root: string) {
+  constructor(root: string, testHooks?: { afterDirectoryOpen?: (path: string) => void | Promise<void> }) {
     if (typeof root !== "string" || !isAbsolute(root)) {
       throw new DomainError("INVALID_OBJECT_STORE_ROOT", "Local object store root must be absolute.");
     }
@@ -29,6 +30,7 @@ export class LocalObjectStore implements ObjectStoreProvider {
       throw new DomainError("INVALID_OBJECT_STORE_ROOT", "Local object store root must not be a filesystem root.");
     }
     this.#root = normalizedRoot;
+    this.#afterDirectoryOpen = testHooks?.afterDirectoryOpen;
     this.#ready = this.#initialize();
   }
 
@@ -67,7 +69,8 @@ export class LocalObjectStore implements ObjectStoreProvider {
   async #initialize(): Promise<string> {
     try {
       await mkdir(this.#root, { recursive: true, mode: 0o700 });
-      return hardenDirectory(this.#root);
+      await assertSafeRootParent(this.#root);
+      return hardenDirectory(this.#root, this.#afterDirectoryOpen);
     } catch (error) {
       throw safeStorageError(error);
     }
@@ -83,7 +86,7 @@ export class LocalObjectStore implements ObjectStoreProvider {
     }
     try {
       const currentRoot = await realpath(this.#root);
-      const currentClinic = await hardenDirectory(clinicDirectory);
+      const currentClinic = await hardenDirectory(clinicDirectory, this.#afterDirectoryOpen);
       const rel = relative(currentRoot, currentClinic);
       if (currentRoot !== root || rel === "" || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         throw new Error("unsafe storage path");
@@ -166,14 +169,60 @@ function safeStorageError(error: unknown): DomainError {
   return new DomainError("OBJECT_STORE_IO_FAILED", "Local object storage operation failed.");
 }
 
-async function hardenDirectory(path: string): Promise<string> {
+async function hardenDirectory(
+  path: string,
+  afterOpen?: (path: string) => void | Promise<void>,
+): Promise<string> {
+  assertNoFollowSupport();
   const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
+    let stat = await handle.stat();
+    assertOwnedDirectory(stat);
+    await afterOpen?.(path);
     await handle.chmod(0o700);
-    const stat = await handle.stat();
-    if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700) throw new Error("unsafe directory");
-    return await realpath(path);
+    stat = await handle.stat();
+    assertOwnedDirectory(stat);
+    if ((stat.mode & 0o777) !== 0o700) throw new Error("unsafe directory permissions");
+    const resolved = await realpath(path);
+    const [pathStat, resolvedStat] = await Promise.all([lstat(path), lstat(resolved)]);
+    if (pathStat.isSymbolicLink() || resolvedStat.isSymbolicLink() ||
+      pathStat.dev !== stat.dev || pathStat.ino !== stat.ino ||
+      resolvedStat.dev !== stat.dev || resolvedStat.ino !== stat.ino) {
+      throw new Error("directory identity changed");
+    }
+    return resolved;
   } finally {
     await handle.close();
+  }
+}
+
+async function assertSafeRootParent(root: string): Promise<void> {
+  assertNoFollowSupport();
+  const parent = dirname(root);
+  const handle = await open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    const pathStat = await lstat(parent);
+    if (!stat.isDirectory() || pathStat.isSymbolicLink() ||
+      pathStat.dev !== stat.dev || pathStat.ino !== stat.ino) throw new Error("unsafe root parent");
+    const currentUid = process.geteuid?.();
+    const privateOwned = currentUid === undefined ||
+      (stat.uid === currentUid && (stat.mode & 0o022) === 0);
+    const sticky = (stat.mode & 0o1000) !== 0;
+    if (!privateOwned && !sticky) throw new Error("root parent permits replacement");
+  } finally {
+    await handle.close();
+  }
+}
+
+function assertOwnedDirectory(stat: Stats): void {
+  if (!stat.isDirectory()) throw new Error("unsafe directory");
+  const currentUid = process.geteuid?.();
+  if (currentUid !== undefined && stat.uid !== currentUid) throw new Error("directory owner mismatch");
+}
+
+function assertNoFollowSupport(): void {
+  if (typeof constants.O_DIRECTORY !== "number" || typeof constants.O_NOFOLLOW !== "number") {
+    throw new Error("safe directory handles unavailable");
   }
 }
