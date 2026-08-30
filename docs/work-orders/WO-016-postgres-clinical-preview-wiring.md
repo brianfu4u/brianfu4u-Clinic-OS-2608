@@ -32,7 +32,7 @@ test/preview.test.ts
 README.md
 ```
 
-Small changes to existing safe read/result types are allowed only if required. No migration, dependency, ORM, authentication framework, session table, chat table, scheduler or event bus.
+Small changes to existing safe read/result types are allowed only if required. A tenant-scoped detached ManagerDecision lookup may be added solely so exact replay can reuse the first trusted server decision time. No migration, dependency, ORM, authentication framework, session table, chat table, scheduler or event bus.
 
 ## 3. Backend boundary
 
@@ -57,16 +57,18 @@ For PostgreSQL work updates:
 - `EXAM_REPORT` requires the server-issued `expectationId` returned by registration, then calls `recordConsequence`; arbitrary IDs remain harmless because WO-015 performs tenant/workflow preflight;
 - caller cannot supply clinic, actor, role, source employee, state, verdict, evidence, Workflow ID or database IDs.
 
-Use a bounded `Idempotency-Key` request header for work updates and manager decisions. Derive stable IDs from the trusted context + operation + key using Node's standard crypto. Exact replay returns the same durable result; key reuse with different content fails closed through immutable conflict rules. Do not add an idempotency table.
+Use a bounded opaque `Idempotency-Key` request header for work updates and manager decisions. Derive stable IDs from the trusted context + resource class + key using Node's standard crypto; kind/action must not change the identity. Exact replay returns the same durable result; key reuse with different content fails closed through immutable conflict rules. Do not encode a caller-controlled timestamp into the key and do not add an idempotency table.
 
-The browser may generate and retain an idempotency key per submitted action. It may retain the returned `expectationId` for the current synthetic sequence; employee topics and that browser continuation are not claimed to survive restart in this ticket.
+`occurredAt` remains the employee-confirmed event time. Artifact `createdAt` and ManagerDecision `decidedAt` come from the server's first trusted receipt time. On exact replay, look up the already-persisted deterministic Artifact/Decision and reuse its original trusted time before invoking the authoritative command. A caller can neither backdate nor forward-date audit time. Concurrent first-use races may retry the lookup after the deterministic ID conflict; they must not create a second identity.
+
+The browser must generate and retain one idempotency key on the form/action until a successful response. A response-loss retry reuses that key; editing the form starts a new action key. It may retain the returned `expectationId` for the current synthetic sequence; employee topics and that browser continuation are not claimed to survive restart in this ticket.
 
 ## 5. Local preview state ordering
 
 The in-memory store continues to enforce topic ownership and `ON_DUTY` before a formal update. Split only the minimum validation/message helpers needed by the async backend path.
 
 - Validate topic/status/input before database work.
-- Append local `WORK_UPDATE` and `WORK_UPDATE_RESULT` messages only after PostgreSQL completion or controlled review result.
+- Append local `WORK_UPDATE` and `WORK_UPDATE_RESULT` messages only after PostgreSQL completion or controlled review result, and at most once per local topic/action key.
 - If any database stage throws, append no local success or work-update message.
 - Ordinary conversation never calls the clinical backend and never appears in manager output.
 
@@ -95,6 +97,8 @@ The in-memory store continues to enforce topic ownership and `ON_DUTY` before a 
 13. incomplete chain does not expose an executable decision action;
 14. health and UI identify the mode as hybrid and disclose which preview state remains volatile;
 15. all existing tests and both demos remain green.
+
+Also assert that manager audit time and Artifact creation time use the first server receipt time across a later replay; the UI reuses a pending action key; exact HTTP replay does not duplicate local messages; and `CLOSE_STANDARD` is rendered only for `MET + VERIFIED`.
 
 Use PGlite as the existing SQL-semantic harness. Server restart means a new HTTP server/backend/store instance over the same PGlite database; only the clinical chain is expected to persist.
 
