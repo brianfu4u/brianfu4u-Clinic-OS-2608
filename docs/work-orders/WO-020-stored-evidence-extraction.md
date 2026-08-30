@@ -106,3 +106,17 @@ Read the Constitution and dependency work orders. Implement only this boundary w
 deterministic provider, run targeted and full tests plus both demos, commit as
 `feat(application): extract stored evidence`, report exact files/tests/deviations, and do not push
 before independent Architecture Review.
+
+## 9. Architecture review — 2026-08-30
+
+**Status:** Accepted
+
+- Extraction and shared inference-boundary tests: 34/34 passed.
+- Full regression: 291/291 passed.
+- Domain and runtime demos: passed.
+- Dependencies, migrations, UI and real model changes: none.
+- Independent review: passed after exact ActorContext enforcement, nominal gateway binding, frozen
+  response-lineage checks, inert descriptor/proxy validation and bounded candidate traversal.
+
+The accepted model is still a deterministic test fixture. A real local OCR/model adapter must use a
+new explicitly frozen model/spec identity and pass the same gateway and extraction contracts.
