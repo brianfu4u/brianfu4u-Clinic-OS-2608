@@ -1,6 +1,6 @@
 # WO-028 — Employee-Scoped Open Expectation Selection
 
-**Status:** Ready for Builder  
+**Status:** Accepted — Architecture Review passed 2026-08-30  
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -231,3 +231,17 @@ feat(preview): select scoped open expectations
 
 Do not push before independent Architecture Review. Report exact files, test count, the external
 PostgreSQL gate separately, and any deviation.
+
+## Architecture acceptance
+
+Accepted after commit `b382740` and independent review.
+
+- Targeted read/HTTP/preview checks: 30/30.
+- Full regression, Domain Demo and Runtime Demo: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- The safe list is tenant-scoped, exact-trigger-employee-scoped, OPEN-only and time-windowed;
+  it returns a detached five-field projection only.
+- The preview selection is transient and synthetic mode returns no fabricated options.
+- GitHub push remains deferred for the batch release.
