@@ -1,6 +1,6 @@
 # WO-027 — Normalized Deployment Profiles and Startup Readiness
 
-**Status:** Architecture frozen / Builder ready
+**Status:** Accepted — Architecture Review passed 2026-08-30
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Depends on:** Constitution, WO-006, WO-018, WO-021, WO-022, WO-024, WO-026
@@ -302,3 +302,19 @@ feat(runtime): normalize startup profiles and readiness
 Do not push before independent Architecture Review. Report separate results for ordinary tests,
 local OCR, the local real-PostgreSQL fail-closed gate, and any cloud readiness gate that remains
 open.
+
+## 9. Architecture acceptance
+
+Accepted after commits `5578108` and `da5a711`, followed by independent review.
+
+- Full regression: 342/342.
+- Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- Legacy preview aliases are hard-rejected; no canonical profile/provider/default can be supplied
+  by compatibility paths.
+- Raw connection URLs, paths and private inference endpoints remain module-private; public
+  assembly returns only usable adapters/probes and rejects forged configs.
+- Cloud readiness returns explicit `CLOUD_PROVIDER_UNAVAILABLE`, never synthetic fallback.
+- GitHub push remains deferred for the batch release.
