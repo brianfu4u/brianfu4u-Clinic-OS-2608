@@ -22,10 +22,11 @@ The service is a restartable process manager, not a generic workflow framework a
 ```text
 src/application/persisted-golden-path.ts
 test/persisted-golden-path.test.ts
+src/persistence/expectation-repository.ts
 README.md
 ```
 
-Small export-only edits are allowed if strictly required. No migration, repository rewrite, dependency, queue, outbox, worker, command bus or framework.
+The only allowed repository edit is a tenant-scoped, detached `getExpectation(context, expectationId)` read used for consequence preflight. No migration, repository rewrite, dependency, queue, outbox, worker, command bus or framework.
 
 ## 3. Commands
 
@@ -72,10 +73,11 @@ In order:
 1. save capture;
 2. authoritative attach;
 3. if attach returns `REVIEW_REQUIRED`, stop with a controlled review result;
-4. re-evaluate the caller-identified durable Expectation at the explicit evaluation time;
-5. require the re-evaluated Expectation's Workflow ID exactly equals the authoritative attached Workflow ID;
-6. verify the current Expectation;
-7. return detached stage results.
+4. read the caller-identified durable Expectation through the allowed tenant-scoped preflight;
+5. require its Workflow ID exactly equals the authoritative attached Workflow ID before any Expectation mutation;
+6. re-evaluate that Expectation at the explicit evaluation time;
+7. verify the current Expectation;
+8. return detached stage results.
 
 Workflow mismatch fails closed with a stable `DomainError`. The already-authoritative capture/link may remain committed, but the service must not verify or claim completion for the wrong Expectation.
 
