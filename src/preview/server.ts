@@ -161,6 +161,7 @@ async function route(
       sendJson(response, 201, store.submitWorkUpdate(employeeContext, input));
       return;
     }
+    const idempotencyKey = requireIdempotencyKey(request.headers["idempotency-key"]);
     const result = await clinicalBackend.submitWorkUpdate(employeeContext, {
       kind: input.kind,
       identityAnchor: input.identityAnchor,
@@ -168,13 +169,14 @@ async function route(
       occurredAt: input.occurredAt,
       text: input.text,
       expectationId: body.expectationId === undefined ? undefined : asString(body.expectationId),
-      idempotencyKey: requireIdempotencyKey(request.headers["idempotency-key"]),
+      idempotencyKey,
       receivedAt: input.now,
     });
     store.appendWorkUpdateResult(
       employeeContext,
       input,
       `${result.workflowId ?? "REVIEW_REQUIRED"} · ${result.expectationState ?? result.status}`,
+      idempotencyKey,
     );
     sendJson(response, 201, result);
     return;

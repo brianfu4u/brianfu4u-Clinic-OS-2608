@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
+import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 
 import type { ActorContext } from "../src/domain/contracts.ts";
@@ -112,7 +113,7 @@ test("hybrid PostgreSQL HTTP tracer persists through standard close and server r
       assert.equal(report.body.verificationStatus, "VERIFIED");
 
       const closed = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": `${NOW}:manager-close-0001` },
+        method: "POST", headers: { "idempotency-key": "manager-close-0001" },
         body: JSON.stringify({ expectationId, action: "CLOSE_STANDARD", reasonCode: null, note: "private note" }),
       });
       assert.equal(closed.response.status, 201);
@@ -120,10 +121,15 @@ test("hybrid PostgreSQL HTTP tracer persists through standard close and server r
       assert.doesNotMatch(JSON.stringify(closed.body), /private note|payload|sourceEmployeeId|fields/);
 
       const changedAction = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": `${NOW}:manager-close-0001` },
+        method: "POST", headers: { "idempotency-key": "manager-close-0001" },
         body: JSON.stringify({ expectationId, action: "VOID", reasonCode: "PATIENT_CANCELLED", note: null }),
       });
       assert.equal(changedAction.body.error, "DECISION_ID_CONFLICT");
+      const audit = await pool.db.query<{ decided_at: string }>(
+        "SELECT decided_at::text FROM manager_decision WHERE expectation_id = $1",
+        [expectationId],
+      );
+      assert.equal(new Date(audit.rows[0].decided_at).toISOString(), NOW);
     });
 
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
@@ -133,10 +139,14 @@ test("hybrid PostgreSQL HTTP tracer persists through standard close and server r
       assert.equal(list.body[0].workflowStatus, "CLOSED");
       assert.equal(list.body[0].latestDecision.action, "CLOSE_STANDARD");
       const replay = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": `${NOW}:manager-close-0001` },
+        method: "POST", headers: { "idempotency-key": "manager-close-0001" },
         body: JSON.stringify({ expectationId, action: "CLOSE_STANDARD", reasonCode: null, note: "private note" }),
       });
       assert.equal(replay.body.workflowStatus, "CLOSED");
+      assert.equal(new Date((await pool.db.query<{ decided_at: string }>(
+        "SELECT decided_at::text FROM manager_decision WHERE expectation_id = $1",
+        [expectationId],
+      )).rows[0].decided_at).toISOString(), NOW);
     }, () => "2026-08-30T12:00:00.000Z");
   } finally { await pool.close(); }
 });
@@ -152,6 +162,11 @@ test("work-update replay is stable across clocks and changed kind with one key c
         method: "POST", headers: { "idempotency-key": "stable-clock-key" },
         body: JSON.stringify(update(topicId, "REGISTRATION")),
       })).body;
+      const audit = await pool.db.query<{ created_at: string }>(
+        "SELECT created_at::text FROM artifact WHERE id = $1",
+        [first.artifactId],
+      );
+      assert.equal(new Date(audit.rows[0].created_at).toISOString(), NOW);
     });
     await server(backend, async (baseUrl) => {
       const topicId = await prepare(baseUrl);
@@ -160,6 +175,10 @@ test("work-update replay is stable across clocks and changed kind with one key c
         body: JSON.stringify(update(topicId, "REGISTRATION")),
       });
       assert.deepEqual(replay.body, first);
+      assert.equal(new Date((await pool.db.query<{ created_at: string }>(
+        "SELECT created_at::text FROM artifact WHERE id = $1",
+        [first.artifactId],
+      )).rows[0].created_at).toISOString(), NOW);
       const changedKind = await json(baseUrl, "/api/employee/work-updates", {
         method: "POST", headers: { "idempotency-key": "stable-clock-key" },
         body: JSON.stringify(update(topicId, "EXAM_REPORT", first.expectationId)),
@@ -230,7 +249,7 @@ test("formal validation and idempotency fail before acquisition; DB failure appe
       }
 
       const badManagerKey = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": "not-a-time" },
+        method: "POST", headers: { "idempotency-key": "short" },
         body: JSON.stringify({ expectationId: "unknown", action: "VOID", reasonCode: "PATIENT_CANCELLED", note: null }),
       });
       assert.equal(badManagerKey.body.error, "INVALID_IDEMPOTENCY_KEY");
@@ -265,10 +284,10 @@ test("explicit postgres startup profile requires configuration and never falls b
   );
 });
 
-test("exact keys replay, conflicting content, injected authority and workflow-only decisions fail closed", async () => {
+test("exact keys replay once locally, conflicting content, injected authority and workflow-only decisions fail closed", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
-    await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
+    await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl, store) => {
       const topicId = await prepare(baseUrl);
       const request = {
         method: "POST", headers: { "idempotency-key": "registration-0005" },
@@ -277,6 +296,7 @@ test("exact keys replay, conflicting content, injected authority and workflow-on
       const first = await json(baseUrl, "/api/employee/work-updates", request);
       const replay = await json(baseUrl, "/api/employee/work-updates", request);
       assert.deepEqual(replay.body, first.body);
+      assert.equal(store.bootstrap(EMPLOYEE).messages.length, 2);
 
       const conflict = await json(baseUrl, "/api/employee/work-updates", {
         ...request, body: JSON.stringify({ ...update(topicId, "REGISTRATION"), text: "different" }),
@@ -292,10 +312,19 @@ test("exact keys replay, conflicting content, injected authority and workflow-on
       assert.equal(injected.body.error, "FORBIDDEN_EMPLOYEE_FIELDS");
 
       const workflowOnly = await json(baseUrl, "/api/manager/decisions", {
-        method: "POST", headers: { "idempotency-key": `${NOW}:manager-close-0002` },
+        method: "POST", headers: { "idempotency-key": "manager-close-0002" },
         body: JSON.stringify({ workflowId: first.body.workflowId, action: "CLOSE_STANDARD", reasonCode: null, note: null }),
       });
       assert.equal(workflowOnly.body.error, "FORBIDDEN_MANAGER_FIELDS");
     });
   } finally { await pool.close(); }
+});
+
+test("browser retains pending keys until success, clears them on edit, and gates standard close", async () => {
+  const source = await readFile(new URL("../src/preview/public/app.js", import.meta.url), "utf8");
+  assert.match(source, /form\.dataset\.idempotencyKey \|\|= crypto\.randomUUID\(\)/);
+  assert.match(source, /addEventListener\("input", \(\) => \{ delete form\.dataset\.idempotencyKey; \}\)/);
+  assert.match(source, /pendingDecisionKeys\.get\(resourceId\) \|\| crypto\.randomUUID\(\)/);
+  assert.match(source, /form\.addEventListener\("input", clear\)/);
+  assert.match(source, /item\.verificationStatus === "VERIFIED" \? \["CLOSE_STANDARD", "VOID"\] : \["VOID"\]/);
 });

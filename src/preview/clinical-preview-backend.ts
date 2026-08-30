@@ -53,12 +53,14 @@ export interface ClinicalPreviewBackend {
 
 export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
   readonly #path: PersistedGoldenPath;
+  readonly #capture: CaptureRepository;
   readonly #closures: ManagerClosureReadRepository;
   readonly #decisions: ManagerDecisionRepository;
 
   constructor(pool: DatabasePool) {
+    this.#capture = new CaptureRepository(pool);
     this.#path = new PersistedGoldenPath({
-      capture: new CaptureRepository(pool),
+      capture: this.#capture,
       attach: new WorkflowAttachRepository(pool),
       expectation: new ExpectationRepository(pool),
       verification: new VerificationRepository(pool),
@@ -82,7 +84,12 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     if (input.workflowFamily !== "EYE_EXAM" || !input.identityAnchor.startsWith("DEMO-")) {
       throw new DomainError("INVALID_CLINICAL_PREVIEW_INPUT", "Only synthetic EYE_EXAM data is accepted.");
     }
+    if (input.kind === "REGISTRATION" && input.expectationId !== undefined) {
+      throw new DomainError("FORBIDDEN_EXPECTATION_ID", "Registration creates its server-derived Expectation ID.");
+    }
+    if (input.kind === "EXAM_REPORT") requireExpectationId(input.expectationId);
     const artifactId = stableId("artifact", context, input.idempotencyKey);
+    const existingArtifact = await this.#capture.getArtifact(context, artifactId);
     const artifact: Artifact = {
       id: artifactId,
       clinicId: context.clinicId,
@@ -92,7 +99,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       sourceEmployeeId: context.actorId,
       identityAnchor: input.identityAnchor,
       payload: { text: input.text, synthetic: true },
-      createdAt: input.occurredAt,
+      createdAt: existingArtifact?.createdAt ?? input.receivedAt,
     };
     const factCard: EvidenceFactCard = {
       id: stableId("fact", context, input.idempotencyKey),
@@ -109,12 +116,8 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       lineageArtifactIds: [artifactId],
     };
     const attachedAt = input.occurredAt;
-    if (input.kind === "REGISTRATION" && input.expectationId !== undefined) {
-      throw new DomainError("FORBIDDEN_EXPECTATION_ID", "Registration creates its server-derived Expectation ID.");
-    }
-    if (input.kind === "EXAM_REPORT") requireExpectationId(input.expectationId);
-    const result = input.kind === "REGISTRATION"
-      ? await this.#path.recordTrigger(context, {
+    const run = () => input.kind === "REGISTRATION"
+      ? this.#path.recordTrigger(context, {
           artifact,
           factCard,
           expectation: {
@@ -127,13 +130,23 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
           attachedAt,
           evaluatedAt: input.occurredAt,
         })
-      : await this.#path.recordConsequence(context, {
+      : this.#path.recordConsequence(context, {
           artifact,
           factCard,
           expectationId: requireExpectationId(input.expectationId),
           attachedAt,
           evaluatedAt: input.occurredAt,
         });
+    let result;
+    try {
+      result = await run();
+    } catch (error) {
+      if (!(error instanceof DomainError) || error.code !== "ARTIFACT_ID_CONFLICT" || existingArtifact) throw error;
+      const racedArtifact = await this.#capture.getArtifact(context, artifactId);
+      if (!racedArtifact) throw error;
+      artifact.createdAt = racedArtifact.createdAt;
+      result = await run();
+    }
 
     if (result.status === "REVIEW_REQUIRED") {
       return structuredClone({
@@ -159,26 +172,36 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     return this.#closures.listManagerClosures(context);
   }
 
-  submitManagerDecision(
+  async submitManagerDecision(
     context: ActorContext,
     rawInput: ClinicalManagerDecisionInput,
   ): Promise<PersistedManagerDecisionResult> {
     assertActorAccess(context, context.clinicId, "MANAGER");
     const input = structuredClone(rawInput);
     requireKey(input.idempotencyKey);
-    const decidedAt = decisionTime(input.idempotencyKey);
+    const decisionId = stableId("decision", context, input.idempotencyKey);
+    const existing = await this.#decisions.getManagerDecision(context, decisionId);
     const receivedAt = parseStrictIsoInstant(input.receivedAt);
-    if (receivedAt === null || decidedAt > receivedAt) {
-      throw new DomainError("INVALID_MANAGER_DECISION_TIME", "Decision key time cannot be in the future.");
+    if (receivedAt === null) {
+      throw new DomainError("INVALID_MANAGER_DECISION_TIME", "Decision receipt time must be valid.");
     }
-    return this.#decisions.recordManagerDecision(context, {
-      id: stableId("decision", context, input.idempotencyKey),
+    const command = {
+      id: decisionId,
       expectationId: requireExpectationId(input.expectationId),
       action: input.action,
       reasonCode: input.reasonCode,
       note: input.note,
-      decidedAt: new Date(decidedAt).toISOString(),
-    });
+      decidedAt: existing?.decidedAt ?? input.receivedAt,
+    };
+    try {
+      return await this.#decisions.recordManagerDecision(context, command);
+    } catch (error) {
+      if (!(error instanceof DomainError) || error.code !== "DECISION_ID_CONFLICT" || existing) throw error;
+      const raced = await this.#decisions.getManagerDecision(context, decisionId);
+      if (!raced) throw error;
+      command.decidedAt = raced.decidedAt;
+      return this.#decisions.recordManagerDecision(context, command);
+    }
   }
 }
 
@@ -209,16 +232,4 @@ function stableId(
     .update(JSON.stringify([context.clinicId, context.actorId, key]))
     .digest("hex")
     .slice(0, 32)}`;
-}
-
-function decisionTime(key: string): number {
-  const match = /^(.+?(?:Z|[+-]\d{2}:\d{2})):(.+)$/.exec(key);
-  const instant = match ? parseStrictIsoInstant(match[1]) : null;
-  if (instant === null) {
-    throw new DomainError(
-      "INVALID_IDEMPOTENCY_KEY",
-      "Manager Idempotency-Key must be <strict ISO instant>:<nonce>.",
-    );
-  }
-  return instant;
 }

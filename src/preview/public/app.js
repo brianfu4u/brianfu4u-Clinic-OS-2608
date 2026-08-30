@@ -43,6 +43,7 @@ let activeTopicId = null;
 let managerItems = [];
 let managerFilter = "all";
 const expectationByAnchor = new Map();
+const pendingDecisionKeys = new Map();
 let postgresClinical = false;
 const app = document.querySelector("#app");
 const t = (key) => strings[language][key];
@@ -146,6 +147,8 @@ function bindComposer() {
   form.querySelectorAll('[name="mode"]').forEach((radio) => radio.addEventListener("change", () => {
     form.querySelector(".work-fields").hidden = form.elements.mode.value !== "work";
   }));
+  form.addEventListener("input", () => { delete form.dataset.idempotencyKey; });
+  form.addEventListener("change", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(form);
@@ -153,8 +156,9 @@ function bindComposer() {
       if (data.get("mode") === "work") {
         const identityAnchor = data.get("identityAnchor");
         const kind = data.get("kind");
+        form.dataset.idempotencyKey ||= crypto.randomUUID();
         const result = await api("/api/employee/work-updates", { method: "POST", headers: {
-          "idempotency-key": crypto.randomUUID(),
+          "idempotency-key": form.dataset.idempotencyKey,
         }, body: JSON.stringify({
           topicId: activeTopicId, kind, identityAnchor,
           workflowFamily: data.get("workflowFamily"), occurredAt: new Date(data.get("occurredAt")).toISOString(), text: data.get("text"),
@@ -163,6 +167,7 @@ function bindComposer() {
         if (kind === "REGISTRATION" && result.expectationId) {
           expectationByAnchor.set(identityAnchor, result.expectationId);
         }
+        delete form.dataset.idempotencyKey;
       } else {
         await api("/api/employee/messages", { method: "POST", body: JSON.stringify({ topicId: activeTopicId, text: data.get("text") }) });
       }
@@ -203,7 +208,10 @@ function renderManager() {
   document.querySelectorAll("[data-decision-form]").forEach((form) => form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(form);
+    const resourceId = postgresClinical ? form.dataset.expectationId : form.dataset.workflowId;
     try {
+      const idempotencyKey = pendingDecisionKeys.get(resourceId) || crypto.randomUUID();
+      pendingDecisionKeys.set(resourceId, idempotencyKey);
       await api("/api/manager/decisions", { method: "POST", body: JSON.stringify({
         [postgresClinical ? "expectationId" : "workflowId"]: postgresClinical
           ? form.dataset.expectationId
@@ -211,19 +219,25 @@ function renderManager() {
         action: data.get("action"),
         reasonCode: data.get("reasonCode") || null,
         note: data.get("note") || null,
-      }), headers: { "idempotency-key": `${new Date().toISOString()}:${crypto.randomUUID()}` } });
+      }), headers: { "idempotency-key": idempotencyKey } });
+      pendingDecisionKeys.delete(resourceId);
       await loadManager();
     } catch (error) {
       form.querySelector('[role="alert"]').textContent = error.message;
     }
   }));
+  document.querySelectorAll("[data-decision-form]").forEach((form) => {
+    const clear = () => pendingDecisionKeys.delete(postgresClinical ? form.dataset.expectationId : form.dataset.workflowId);
+    form.addEventListener("input", clear);
+    form.addEventListener("change", clear);
+  });
   bindLanguage();
 }
 
 function decisionForm(item) {
   if (item.workflowStatus !== "OPEN" || !item.expectationId || !item.verificationStatus) return "";
   const actions = item.expectationState === "MET"
-    ? ["CLOSE_STANDARD", "VOID"]
+    ? item.verificationStatus === "VERIFIED" ? ["CLOSE_STANDARD", "VOID"] : ["VOID"]
     : item.expectationState === "UNMET"
       ? ["CLOSE_EXCEPTION", "KEEP_OPEN", "VOID"]
       : ["KEEP_OPEN", "VOID"];

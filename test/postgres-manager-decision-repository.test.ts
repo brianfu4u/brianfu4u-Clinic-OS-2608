@@ -437,3 +437,33 @@ test("caller and returned mutations cannot change persisted authority or arrays"
     await pool.close();
   }
 });
+
+test("manager decision lookup is manager-only, tenant-scoped and detached", async () => {
+  const pool = new PGlitePoolShim();
+  await pool.migrate();
+  try {
+    await seed(pool, "OPEN");
+    const repository = new ManagerDecisionRepository(pool);
+    await repository.recordManagerDecision(manager(), command("KEEP_OPEN"));
+    const before = pool.acquisitions;
+    await assert.rejects(
+      repository.getManagerDecision({ ...manager(), role: "EMPLOYEE" }, "decision-a"),
+      (error: unknown) => error instanceof DomainError && error.code === "ROLE_SCOPE_VIOLATION",
+    );
+    await assert.rejects(
+      repository.getManagerDecision(manager(), " "),
+      (error: unknown) => error instanceof DomainError && error.code === "INVALID_DECISION_ID",
+    );
+    assert.equal(pool.acquisitions, before);
+    assert.equal(await repository.getManagerDecision(manager("clinic-b"), "decision-a"), null);
+    const found = await repository.getManagerDecision(manager(), "decision-a");
+    assert.ok(found);
+    found.evidenceArtifactIds.push("forged");
+    assert.deepEqual(
+      (await repository.getManagerDecision(manager(), "decision-a"))?.evidenceArtifactIds,
+      ["trigger-a"],
+    );
+  } finally {
+    await pool.close();
+  }
+});

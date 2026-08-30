@@ -1,4 +1,4 @@
-import { assertActorContext } from "../domain/access-context.ts";
+import { assertActorAccess, assertActorContext } from "../domain/access-context.ts";
 import type {
   ActorContext,
   Expectation,
@@ -121,6 +121,19 @@ export class ManagerDecisionRepository {
 
   constructor(pool: DatabasePool) {
     this.#pool = pool;
+  }
+
+  async getManagerDecision(
+    context: ActorContext,
+    decisionId: string,
+  ): Promise<PersistedManagerDecision | null> {
+    const captured = structuredClone({ context, decisionId });
+    assertActorAccess(captured.context, captured.context.clinicId, "MANAGER");
+    if (typeof captured.decisionId !== "string" || captured.decisionId.trim() === "") {
+      throw new DomainError("INVALID_DECISION_ID", "Decision ID is required.");
+    }
+    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) =>
+      structuredClone(await findDecision(client, captured.context.clinicId, captured.decisionId)));
   }
 
   async recordManagerDecision(

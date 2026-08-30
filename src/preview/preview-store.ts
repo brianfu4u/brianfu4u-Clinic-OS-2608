@@ -82,6 +82,7 @@ export class PreviewStore {
   readonly #repositories = createInMemoryRepositories();
   readonly #topics = new Map<string, PreviewTopic>();
   readonly #messages: PreviewMessage[] = [];
+  readonly #workUpdateActions = new Set<string>();
   readonly #expectations = new Map<string, StoredExpectation>();
   readonly #clinicId: string;
   readonly #statuses = new Map<string, EmployeeStatus>();
@@ -193,11 +194,15 @@ export class PreviewStore {
     context: ActorContext,
     input: PreviewWorkUpdateInput,
     resultText: string,
+    actionKey: string,
   ): void {
     this.#employee(context);
     this.#requireTopic(context, input.topicId);
+    const key = JSON.stringify([context.clinicId, context.actorId, input.topicId, actionKey]);
+    if (this.#workUpdateActions.has(key)) return;
     this.#addMessage(context, input.topicId, "EMPLOYEE", "WORK_UPDATE", input.text, input.now);
     this.#addMessage(context, input.topicId, "LOCAL_SYSTEM", "WORK_UPDATE_RESULT", resultText, input.now);
+    this.#workUpdateActions.add(key);
   }
 
   submitWorkUpdate(context: ActorContext, rawInput: PreviewWorkUpdateInput): {
@@ -262,7 +267,7 @@ export class PreviewStore {
       expectation: result.expectation,
       identityAnchor,
     });
-    this.appendWorkUpdateResult(context, input, `${result.workflow.id} · ${result.expectation.state}`);
+    this.appendWorkUpdateResult(context, input, `${result.workflow.id} · ${result.expectation.state}`, result.artifact.id);
     return {
       artifactId: artifact.id,
       clinicId: context.clinicId,
