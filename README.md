@@ -50,5 +50,8 @@ The current Expectation projection can now be passed through the existing determ
 S2 engine and recorded in an immutable, tenant-scoped verification ledger. Persisted
 manager decisions now bind that exact S2 snapshot to an immutable human record and update
 Workflow/Expectation projections atomically, including append-only human VOID history.
+The PostgreSQL manager closure read model returns tenant-scoped Workflow, Expectation,
+Verification, evidence-ID and decision summaries without reading raw Artifact, FactCard,
+employee-conversation or decision-note content. Incomplete chains remain explicit review items.
 Preview/API persistence parity, reopen/correction flows, real PostgreSQL application-role
 RLS/concurrency proof, backup and restore remain separate acceptance gates.
