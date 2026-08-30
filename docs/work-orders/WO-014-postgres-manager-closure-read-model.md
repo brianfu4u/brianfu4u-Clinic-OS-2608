@@ -1,6 +1,6 @@
 # WO-014 — PostgreSQL Manager Closure Read Model
 
-**Status:** READY FOR BUILD
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -129,3 +129,18 @@ npm run runtime:demo
 ## 10. Builder handoff
 
 The Builder must read the Constitution and WO-002, WO-004, WO-007 through WO-014, implement only this read slice, run all acceptance commands, commit as `feat(persistence): add manager closure read model`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 11. Architecture acceptance
+
+Accepted on 2026-08-30 through `345939b` after independent review.
+
+- 212/212 tests and both demos pass.
+- Normal OPEN/PENDING, UNMET, CONFLICT, CLOSED and VOIDED chains project deterministically.
+- Missing Expectation, current Verification or terminal decision remains visible through controlled review reasons.
+- Terminal items use the immutable decision-time Verification snapshot; open items use only the current transition-bound `S2_V1` record.
+- Manager role and tenant scope are enforced before queries; identical cross-clinic IDs and injection text remain isolated.
+- The output allowlist excludes Artifact payloads, FactCard fields, employee identity/conversation and decision notes.
+- Ordering is deterministic, malformed/duplicate current records fail closed, and returned values are detached.
+- No migration, dependency, write path, UI or API route was added.
+
+HTTP/UI persistence wiring, scheduling, real PostgreSQL application-role RLS/concurrency, backup and restore remain later acceptance gates.
