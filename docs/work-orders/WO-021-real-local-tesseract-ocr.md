@@ -21,14 +21,14 @@ approved de-identified clinical-language validation set passes its frozen thresh
 
 - engine: Tesseract 5.3.4 / Leptonica 1.82;
 - provider kind: `LOCAL_MODEL`;
-- languages present: `eng`, `osd` only;
+- languages present: `eng`, `osd` only; this Provider trusts and invokes `eng` only, with no OSD
+  fallback;
 - Tesseract license: Apache-2.0;
 - current executable SHA-256:
   `9f831cab7525c3dab04af41bda35182af7ea1df9dceeaaa2f3bf207ac45c06a5`;
 - `eng.traineddata` SHA-256:
   `7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2`;
-- `osd.traineddata` SHA-256:
-  `9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff`.
+- `osd.traineddata` is present in the executor but is not an invoked or trusted Provider asset.
 
 Repository metadata records hashes/licenses but never commits system model weights.
 
@@ -120,3 +120,19 @@ Read the Constitution and dependency work orders. Implement the smallest real ad
 gate, run unit/full tests, demos and `accept:ocr-local`, commit as
 `feat(runtime): add local tesseract OCR provider`, report unit versus real-gate results separately,
 and do not push before independent Architecture Review.
+
+## 10. Architecture review — 2026-08-30
+
+**Status:** `IMPLEMENTED / STRICT_OFFLINE + CLINICAL_LANGUAGE GATES OPEN`
+
+- Ordinary OCR unit tests: 7/7 passed without requiring system Tesseract assets.
+- Real local OCR acceptance: 2/2 passed, including two synthetic English images and frozen-asset
+  path/hash/permission attacks.
+- Full regression: 298/298 passed; domain and runtime demos passed.
+- Production Provider exposes no runner, manifest or mutable trust-anchor injection.
+- Frozen engine/model/config assets are verified across their complete filesystem ancestry before,
+  during and after execution under the documented trusted-owner threat model.
+- Independent security review: passed with no remaining code blocker.
+
+This is a real English adapter acceptance, not clinical-language or physically network-isolated
+acceptance. The two external gates in section 7 remain mandatory before production clinical use.
