@@ -1,6 +1,6 @@
 # WO-026 — Employee Evidence Flow in the Local Preview
 
-**Status:** FROZEN FOR BUILD — Architecture work order
+**Status:** Accepted — Architecture Review passed 2026-08-30
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -275,3 +275,18 @@ behavior, test count and any external PostgreSQL gate separately.
 - Manager uses the existing closure read model only.
 - Error mapping is static and bounded; CORS is same-origin by default and never wildcard.
 - No new dependency or domain/database/model scope was introduced.
+
+## Architecture acceptance
+
+Accepted after commit `1f46908` and independent review.
+
+- Full regression: 329/329.
+- Preview/HTTP focused checks: passed; local HTTP smoke for employee, manager and health routes
+  passed.
+- Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- Browser-side object references remain transient in-memory state; no raw evidence, PHI, bytes,
+  paths or provider output are written to URL, browser storage or console.
+- GitHub push remains deferred for the batch release.
