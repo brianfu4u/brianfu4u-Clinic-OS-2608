@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 import { DomainError } from "../domain/errors.ts";
 import type { ActorContext, ManagerDecisionAction } from "../domain/contracts.ts";
 import { assertActorAccess, assertActorContext } from "../domain/access-context.ts";
+import { createNodePgPool } from "../persistence/node-pg-pool.ts";
 import { PreviewStore, type EmployeeStatus } from "./preview-store.ts";
+import type { ClinicalPreviewBackend } from "./clinical-preview-backend.ts";
+import { PostgresClinicalPreviewBackend, requireIdempotencyKey } from "./clinical-preview-backend.ts";
 
 const PUBLIC_FILES = new Map([
   ["/app.css", { file: "public/app.css", type: "text/css; charset=utf-8" }],
@@ -18,6 +21,7 @@ export function createPreviewServer(options: {
   clock?: () => string;
   employeeContext?: ActorContext;
   managerContext?: ActorContext;
+  clinicalBackend?: ClinicalPreviewBackend;
 } = {}) {
   const employeeContext = options.employeeContext ?? {
     clinicId: "demo-clinic",
@@ -38,7 +42,15 @@ export function createPreviewServer(options: {
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, store, clock, employeeContext, managerContext);
+      await route(
+        request,
+        response,
+        store,
+        clock,
+        employeeContext,
+        managerContext,
+        options.clinicalBackend,
+      );
     } catch (error) {
       if (error instanceof DomainError) {
         sendJson(response, 400, { error: error.code, message: error.message });
@@ -49,6 +61,17 @@ export function createPreviewServer(options: {
   });
 }
 
+export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.env) {
+  const mode = env.PREVIEW_MODE ?? "synthetic";
+  if (mode === "synthetic") return createPreviewServer();
+  if (mode !== "postgres") throw new Error("INVALID_PREVIEW_MODE");
+  if (!env.DATABASE_URL?.trim()) throw new Error("DATABASE_URL_REQUIRED");
+  const pool = createNodePgPool(env.DATABASE_URL);
+  const server = createPreviewServer({ clinicalBackend: new PostgresClinicalPreviewBackend(pool) });
+  server.once("close", () => { void pool.close(); });
+  return server;
+}
+
 async function route(
   request: IncomingMessage,
   response: ServerResponse,
@@ -56,6 +79,7 @@ async function route(
   clock: () => string,
   employeeContext: ActorContext,
   managerContext: ActorContext,
+  clinicalBackend?: ClinicalPreviewBackend,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -77,7 +101,14 @@ async function route(
     return;
   }
   if (method === "GET" && path === "/api/health") {
-    sendJson(response, 200, { status: "ok", mode: "synthetic-local-preview" });
+    sendJson(response, 200, clinicalBackend
+      ? {
+          status: "ok",
+          mode: "hybrid-postgres-preview",
+          persistent: ["clinical-chain", "manager-decisions"],
+          volatile: ["employee-status", "topics", "conversation", "browser-continuation"],
+        }
+      : { status: "ok", mode: "synthetic-local-preview" });
     return;
   }
   if (method === "GET" && path === "/api/employee/bootstrap") {
@@ -112,10 +143,12 @@ async function route(
     const body = await jsonBody(request);
     rejectUnexpectedKeys(
       body,
-      ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text"],
+      clinicalBackend
+        ? ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text", "expectationId"]
+        : ["topicId", "kind", "identityAnchor", "workflowFamily", "occurredAt", "text"],
       "FORBIDDEN_EMPLOYEE_FIELDS",
     );
-    sendJson(response, 201, store.submitWorkUpdate(employeeContext, {
+    const input = store.validateWorkUpdate(employeeContext, {
       topicId: asString(body.topicId),
       kind: asString(body.kind) as "REGISTRATION" | "EXAM_REPORT",
       identityAnchor: asString(body.identityAnchor),
@@ -123,20 +156,60 @@ async function route(
       occurredAt: asString(body.occurredAt),
       text: asString(body.text),
       now: clock(),
-    }));
+    });
+    if (!clinicalBackend) {
+      sendJson(response, 201, store.submitWorkUpdate(employeeContext, input));
+      return;
+    }
+    const result = await clinicalBackend.submitWorkUpdate(employeeContext, {
+      kind: input.kind,
+      identityAnchor: input.identityAnchor,
+      workflowFamily: "EYE_EXAM",
+      occurredAt: input.occurredAt,
+      text: input.text,
+      expectationId: body.expectationId === undefined ? undefined : asString(body.expectationId),
+      idempotencyKey: requireIdempotencyKey(request.headers["idempotency-key"]),
+      receivedAt: input.now,
+    });
+    store.appendWorkUpdateResult(
+      employeeContext,
+      input,
+      `${result.workflowId ?? "REVIEW_REQUIRED"} · ${result.expectationState ?? result.status}`,
+    );
+    sendJson(response, 201, result);
     return;
   }
   if (method === "GET" && path === "/api/manager/closures") {
-    sendJson(response, 200, store.managerClosures(managerContext, clock()));
+    sendJson(response, 200, clinicalBackend
+      ? await clinicalBackend.listManagerClosures(managerContext)
+      : store.managerClosures(managerContext, clock()));
     return;
   }
   if (method === "POST" && path === "/api/manager/decisions") {
     const body = await jsonBody(request);
     rejectUnexpectedKeys(
       body,
-      ["workflowId", "action", "reasonCode", "note"],
+      clinicalBackend
+        ? ["expectationId", "action", "reasonCode", "note"]
+        : ["workflowId", "action", "reasonCode", "note"],
       "FORBIDDEN_MANAGER_FIELDS",
     );
+    if (clinicalBackend) {
+      const expectationId = asString(body.expectationId);
+      await clinicalBackend.submitManagerDecision(managerContext, {
+        expectationId,
+        action: asString(body.action) as ManagerDecisionAction,
+        reasonCode: asNullableString(body.reasonCode),
+        note: asNullableString(body.note),
+        idempotencyKey: requireIdempotencyKey(request.headers["idempotency-key"]),
+        receivedAt: clock(),
+      });
+      const item = (await clinicalBackend.listManagerClosures(managerContext))
+        .find((candidate) => candidate.expectationId === expectationId);
+      if (!item) throw new DomainError("EXPECTATION_NOT_FOUND", "Manager item was not found after decision.");
+      sendJson(response, 201, item);
+      return;
+    }
     sendJson(response, 201, store.submitManagerDecision(managerContext, {
       workflowId: asString(body.workflowId),
       action: asString(body.action) as ManagerDecisionAction,
@@ -147,6 +220,13 @@ async function route(
     return;
   }
   if (method === "GET" && path === "/api/manager/decisions") {
+    if (clinicalBackend) {
+      sendJson(response, 409, {
+        error: "NOT_AVAILABLE_IN_POSTGRES_PREVIEW",
+        message: "Decision history is not exposed by this hybrid preview.",
+      });
+      return;
+    }
     sendJson(
       response,
       200,
@@ -224,7 +304,7 @@ function send(
 if (import.meta.main) {
   const host = process.env.PREVIEW_HOST ?? "127.0.0.1";
   const port = Number(process.env.PREVIEW_PORT ?? 3000);
-  const server = createPreviewServer();
+  const server = createConfiguredPreviewServer();
   server.listen(port, host, () => {
     console.log(`Employee: http://${host}:${port}/employee`);
     console.log(`Manager:  http://${host}:${port}/manager`);

@@ -9,6 +9,7 @@ const strings = {
     noItems: "表示するワークフローはありません。", needsReview: "要確認", quiet: "確認不要",
     action: "店長アクション", reason: "理由コード", note: "任意メモ", decide: "決定を記録", latest: "最新決定",
     expectation: "予期", verification: "S2検証",
+    hybrid: "PostgreSQL臨床チェーンは永続化・会話と勤務状態は再起動で消去",
   },
   zh: {
     product: "Clinic OS · 合成数据预览", employee: "员工端", manager: "店长端",
@@ -20,6 +21,7 @@ const strings = {
     noItems: "暂无工作流。", needsReview: "需要复核", quiet: "无需复核",
     action: "店长操作", reason: "原因代码", note: "可选备注", decide: "记录决定", latest: "最近决定",
     expectation: "预期状态", verification: "S2验证",
+    hybrid: "PostgreSQL临床链持久化；对话和工作状态重启后清空",
   },
   en: {
     product: "Clinic OS · Synthetic preview", employee: "Employee", manager: "Manager",
@@ -31,6 +33,7 @@ const strings = {
     noItems: "No workflows to display.", needsReview: "Needs review", quiet: "No review needed",
     action: "Manager action", reason: "Reason code", note: "Optional note", decide: "Record decision", latest: "Latest decision",
     expectation: "Expectation", verification: "S2 verification",
+    hybrid: "PostgreSQL clinical chain is durable; chat and work status reset on restart",
   },
 };
 
@@ -39,13 +42,16 @@ let bootstrap = null;
 let activeTopicId = null;
 let managerItems = [];
 let managerFilter = "all";
+const expectationByAnchor = new Map();
+let postgresClinical = false;
 const app = document.querySelector("#app");
 const t = (key) => strings[language][key];
+const previewNotice = () => `${t("synthetic")}${postgresClinical ? ` ${t("hybrid")}` : ""}`;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: options.body ? { "content-type": "application/json" } : undefined,
+    headers: options.body ? { "content-type": "application/json", ...options.headers } : options.headers,
   });
   const body = await response.json();
   if (!response.ok) throw new Error(body.message || body.error);
@@ -83,7 +89,7 @@ function renderEmployee() {
       <ul class="topics">${topicList()}</ul>
     </aside>
     <main class="main"><div class="topbar"><h2>${escapeHtml(topic?.title || t("employee"))}</h2>${languageButtons()}</div>
-      <p class="notice">${t("synthetic")}</p>
+      <p class="notice">${previewNotice()}</p>
       <section class="thread" aria-label="Message thread">${messages.map((message) => `<div class="message ${message.role === "EMPLOYEE" ? "employee" : ""}">${escapeHtml(message.text)}</div>`).join("") || `<p class="empty">${t("newTopic")}</p>`}</section>
       ${topic ? composer() : ""}
     </main></div>`;
@@ -145,10 +151,18 @@ function bindComposer() {
     const data = new FormData(form);
     try {
       if (data.get("mode") === "work") {
-        await api("/api/employee/work-updates", { method: "POST", body: JSON.stringify({
-          topicId: activeTopicId, kind: data.get("kind"), identityAnchor: data.get("identityAnchor"),
+        const identityAnchor = data.get("identityAnchor");
+        const kind = data.get("kind");
+        const result = await api("/api/employee/work-updates", { method: "POST", headers: {
+          "idempotency-key": crypto.randomUUID(),
+        }, body: JSON.stringify({
+          topicId: activeTopicId, kind, identityAnchor,
           workflowFamily: data.get("workflowFamily"), occurredAt: new Date(data.get("occurredAt")).toISOString(), text: data.get("text"),
+          ...(kind === "EXAM_REPORT" ? { expectationId: expectationByAnchor.get(identityAnchor) } : {}),
         }) });
+        if (kind === "REGISTRATION" && result.expectationId) {
+          expectationByAnchor.set(identityAnchor, result.expectationId);
+        }
       } else {
         await api("/api/employee/messages", { method: "POST", body: JSON.stringify({ topicId: activeTopicId, text: data.get("text") }) });
       }
@@ -170,7 +184,7 @@ function renderManager() {
     (managerFilter === "open" && item.expectationState === "OPEN") ||
     (managerFilter === "complete" && (item.workflowStatus !== "OPEN" || item.expectationState === "MET")));
   app.innerHTML = `<main class="main"><div class="topbar"><div><h1>${t("manager")}</h1><a href="/employee">${t("employee")}</a></div>${languageButtons()}</div>
-    <p class="notice">${t("synthetic")}</p><div class="filters">
+    <p class="notice">${previewNotice()}</p><div class="filters">
       ${[["all", "all"], ["review", "review"], ["open", "open"], ["complete", "complete"]].map(([value, key]) => `<button type="button" data-filter="${value}" aria-pressed="${managerFilter === value}">${t(key)}</button>`).join("")}
       <button type="button" id="refresh">${t("refresh")}</button></div>
     <section class="cards">${visible.map((item) => `<article class="card ${item.needsReview ? "review" : ""}">
@@ -191,11 +205,13 @@ function renderManager() {
     const data = new FormData(form);
     try {
       await api("/api/manager/decisions", { method: "POST", body: JSON.stringify({
-        workflowId: form.dataset.workflowId,
+        [postgresClinical ? "expectationId" : "workflowId"]: postgresClinical
+          ? form.dataset.expectationId
+          : form.dataset.workflowId,
         action: data.get("action"),
         reasonCode: data.get("reasonCode") || null,
         note: data.get("note") || null,
-      }) });
+      }), headers: { "idempotency-key": `${new Date().toISOString()}:${crypto.randomUUID()}` } });
       await loadManager();
     } catch (error) {
       form.querySelector('[role="alert"]').textContent = error.message;
@@ -205,14 +221,14 @@ function renderManager() {
 }
 
 function decisionForm(item) {
-  if (item.workflowStatus !== "OPEN") return "";
+  if (item.workflowStatus !== "OPEN" || !item.expectationId || !item.verificationStatus) return "";
   const actions = item.expectationState === "MET"
     ? ["CLOSE_STANDARD", "VOID"]
     : item.expectationState === "UNMET"
       ? ["CLOSE_EXCEPTION", "KEEP_OPEN", "VOID"]
       : ["KEEP_OPEN", "VOID"];
   const reasons = ["LEGITIMATE_DEVIATION", "MISSING_EXTERNAL_RECORD", "DUPLICATE_WORKFLOW", "PATIENT_CANCELLED", "NEEDS_MORE_EVIDENCE"];
-  return `<form class="decision-form" data-decision-form data-workflow-id="${escapeHtml(item.workflowId)}">
+  return `<form class="decision-form" data-decision-form data-workflow-id="${escapeHtml(item.workflowId)}" data-expectation-id="${escapeHtml(item.expectationId)}">
     <label>${t("action")}<select name="action">${actions.map((action) => `<option>${action}</option>`).join("")}</select></label>
     <label>${t("reason")}<select name="reasonCode"><option value="">—</option>${reasons.map((reason) => `<option>${reason}</option>`).join("")}</select></label>
     <label>${t("note")}<input name="note" maxlength="500"></label>
@@ -230,8 +246,10 @@ function render() {
   else renderEmployee();
 }
 
-if (location.pathname === "/manager") loadManager().catch(showFatal);
-else loadEmployee().catch(showFatal);
+api("/api/health").then((health) => {
+  postgresClinical = health.mode === "hybrid-postgres-preview";
+  return location.pathname === "/manager" ? loadManager() : loadEmployee();
+}).catch(showFatal);
 
 function showFatal(error) {
   app.innerHTML = `<main class="main"><p role="alert">${escapeHtml(error.message)}</p></main>`;

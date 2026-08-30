@@ -20,7 +20,16 @@ npm run preview
 
 Open `http://127.0.0.1:3000/employee` for the employee preview or
 `http://127.0.0.1:3000/manager` for the manager preview. The implementation
-uses in-memory synthetic data only and is not a production application.
+uses in-memory synthetic data by default and is not a production application.
+
+To run the hybrid preview against an already migrated PostgreSQL database:
+
+```bash
+PREVIEW_MODE=postgres DATABASE_URL='postgresql://...' npm run preview
+```
+
+This startup path does not run migrations. A missing `DATABASE_URL` fails startup and
+never falls back to the in-memory clinical backend.
 
 ## PostgreSQL acceptance boundary
 
@@ -30,8 +39,7 @@ development executor. Real PostgreSQL server integration, application-role RLS
 enforcement, backup and restore remain required before production or clinic use.
 
 The tenant-scoped capture repository persists only Artifact + EvidenceFactCard through
-the same SQL-semantic harness. The preview still uses synthetic in-memory state; preview
-persistence parity and durable Workflow/Expectation/Decision operations are not complete.
+the same SQL-semantic harness.
 PostgreSQL `timestamptz` stores instants rather than the input timestamp spelling. Capture
 replay therefore compares only the declared Artifact/FactCard timestamp fields by instant;
 identity anchors, payload fields and all other strings remain exact.
@@ -57,5 +65,9 @@ The restartable persisted golden-path application service now coordinates captur
 attach, Expectation evaluation and S2 Verification for explicit trigger and consequence commands.
 Each repository stage remains its own short atomic transaction; replay resumes incomplete chains
 without claiming a global Artifact-to-Verification transaction.
-Preview/API persistence parity, reopen/correction flows, real PostgreSQL application-role
+An explicitly supplied clinical backend now runs work updates, manager closure reads and
+manager decisions through PostgreSQL while topics, ordinary chat and employee status remain
+volatile synthetic preview state. The default `npm run preview` path remains wholly in memory;
+missing PostgreSQL configuration never silently selects it as a persistence fallback.
+Reopen/correction flows, real PostgreSQL application-role
 RLS/concurrency proof, backup and restore remain separate acceptance gates.

@@ -48,6 +48,16 @@ export interface ManagerPreviewItem extends ManagerClosureView {
   latestDecision: Pick<ManagerDecision, "action" | "reasonCode" | "decidedAt"> | null;
 }
 
+export interface PreviewWorkUpdateInput {
+  topicId: string;
+  kind: "REGISTRATION" | "EXAM_REPORT";
+  identityAnchor: string;
+  workflowFamily: string;
+  occurredAt: string;
+  text: string;
+  now: string;
+}
+
 interface StoredExpectation {
   expectation: Expectation;
   identityAnchor: string;
@@ -151,21 +161,7 @@ export class PreviewStore {
     return structuredClone([employeeMessage, acknowledgement]);
   }
 
-  submitWorkUpdate(context: ActorContext, input: {
-    topicId: string;
-    kind: "REGISTRATION" | "EXAM_REPORT";
-    identityAnchor: string;
-    workflowFamily: string;
-    occurredAt: string;
-    text: string;
-    now: string;
-  }): {
-    artifactId: string;
-    clinicId: string;
-    sourceEmployeeId: string;
-    workflowId: string;
-    expectationState: Expectation["state"];
-  } {
+  validateWorkUpdate(context: ActorContext, input: PreviewWorkUpdateInput): PreviewWorkUpdateInput {
     this.#employee(context);
     this.#requireTopic(context, input.topicId);
     if (this.#statuses.get(context.actorId) !== "ON_DUTY") {
@@ -184,9 +180,35 @@ export class PreviewStore {
     if (input.workflowFamily !== "EYE_EXAM") {
       throw new DomainError("INVALID_WORKFLOW_FAMILY", "Only EYE_EXAM is supported.");
     }
-    const occurredAt = requireTimestamp(input.occurredAt, "Work update occurredAt");
-    const now = requireTimestamp(input.now, "Work update receivedAt");
-    const text = requireText(input.text, "Work update text");
+    return structuredClone({
+      ...input,
+      identityAnchor,
+      occurredAt: requireTimestamp(input.occurredAt, "Work update occurredAt"),
+      now: requireTimestamp(input.now, "Work update receivedAt"),
+      text: requireText(input.text, "Work update text"),
+    });
+  }
+
+  appendWorkUpdateResult(
+    context: ActorContext,
+    input: PreviewWorkUpdateInput,
+    resultText: string,
+  ): void {
+    this.#employee(context);
+    this.#requireTopic(context, input.topicId);
+    this.#addMessage(context, input.topicId, "EMPLOYEE", "WORK_UPDATE", input.text, input.now);
+    this.#addMessage(context, input.topicId, "LOCAL_SYSTEM", "WORK_UPDATE_RESULT", resultText, input.now);
+  }
+
+  submitWorkUpdate(context: ActorContext, rawInput: PreviewWorkUpdateInput): {
+    artifactId: string;
+    clinicId: string;
+    sourceEmployeeId: string;
+    workflowId: string;
+    expectationState: Expectation["state"];
+  } {
+    const input = this.validateWorkUpdate(context, rawInput);
+    const { identityAnchor, occurredAt, now, text } = input;
 
     const prior = [...this.#expectations.entries()].find(
       ([workflowId, { identityAnchor: anchor }]) =>
@@ -240,15 +262,7 @@ export class PreviewStore {
       expectation: result.expectation,
       identityAnchor,
     });
-    this.#addMessage(context, input.topicId, "EMPLOYEE", "WORK_UPDATE", text, now);
-    this.#addMessage(
-      context,
-      input.topicId,
-      "LOCAL_SYSTEM",
-      "WORK_UPDATE_RESULT",
-      `${result.workflow.id} · ${result.expectation.state}`,
-      now,
-    );
+    this.appendWorkUpdateResult(context, input, `${result.workflow.id} · ${result.expectation.state}`);
     return {
       artifactId: artifact.id,
       clinicId: context.clinicId,
