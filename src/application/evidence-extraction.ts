@@ -1,0 +1,371 @@
+import { createHash } from "node:crypto";
+
+import { assertActorContext } from "../domain/access-context.ts";
+import type { ActorContext, Artifact, EvidenceFactCard } from "../domain/contracts.ts";
+import { DomainError } from "../domain/errors.ts";
+import { assertFactCardIdentitySource, requireClinicalIdentity } from "../domain/identity-gate.ts";
+import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
+import type { InferenceRequest, InferenceResponse } from "../runtime/contracts.ts";
+import type { ProviderGetResponse, StoredObjectRef } from "../storage/contracts.ts";
+
+const COMMAND_KEYS = [
+  "artifactId", "createdAt", "factCardId", "identityAnchor", "kind", "objectRef",
+  "occurredAt", "occurredAtSource", "requestId",
+];
+const CANDIDATE_KEYS = [
+  "confidence", "fields", "missingFields", "subjectTypeCandidate", "workflowFamilyCandidate",
+];
+const REF_KEYS = ["clinicId", "contentSha256", "mediaType", "objectId", "sizeBytes"];
+const SPEC_KEYS = [
+  "allowedMediaTypes", "artifactKind", "capability", "minimumConfidence", "parserVersion",
+  "policyVersion", "requiredFields", "schemaVersion", "subjectType", "workflowFamily",
+];
+const ALLOWED_MEDIA = ["application/pdf", "image/jpeg", "image/png"] as const;
+const FORBIDDEN_KEYS = new Set([
+  "action", "actorId", "artifactId", "attachedAt", "clinicId", "createdAt", "decidedAt",
+  "decisionId", "decisionSource", "evaluatedAt", "expectationId", "factCardId", "identityAnchor",
+  "lineage", "lineageArtifactIds", "linkId", "occurredAt", "receivedAt", "reasoningChain", "role",
+  "satisfiedByArtifactId", "sourceEmployeeId", "state", "status", "triggerArtifactId", "triggeredAt",
+  "consequenceArtifactId", "dueAt", "evidenceArtifactIds", "updatedAt", "verificationId", "voided",
+  "workflowId",
+]);
+const MAX_FIELD_COUNT = 64;
+const MAX_FIELDS_JSON_BYTES = 64 * 1024;
+
+export interface ExtractionSpec {
+  capability: string;
+  schemaVersion: string;
+  policyVersion: string;
+  parserVersion: string;
+  allowedMediaTypes: readonly string[];
+  artifactKind: string;
+  subjectType: string;
+  workflowFamily: string;
+  requiredFields: readonly string[];
+  minimumConfidence: number;
+}
+
+export const EYE_EXAM_EXTRACTION_SPEC: Readonly<ExtractionSpec> = Object.freeze({
+  capability: "EXTRACT_EYE_EXAM_REPORT",
+  schemaVersion: "eye-exam-candidate-v1",
+  policyVersion: "stored-evidence-policy-v1",
+  parserVersion: "stored-evidence-parser-v1",
+  allowedMediaTypes: Object.freeze([...ALLOWED_MEDIA]),
+  artifactKind: "EXAM_REPORT",
+  subjectType: "PATIENT",
+  workflowFamily: "EYE_EXAM",
+  requiredFields: Object.freeze(["reportType"]),
+  minimumConfidence: 0.8,
+});
+
+export interface StoredEvidenceExtractionCommand {
+  requestId: string;
+  artifactId: string;
+  factCardId: string;
+  objectRef: StoredObjectRef;
+  kind: string;
+  occurredAt: string | null;
+  occurredAtSource: Artifact["occurredAtSource"];
+  identityAnchor: string | null;
+  createdAt: string;
+}
+
+export interface ExtractionCandidate {
+  subjectTypeCandidate: string;
+  workflowFamilyCandidate: string;
+  fields: Record<string, unknown>;
+  missingFields: string[];
+  confidence: number;
+}
+
+export interface ExtractionLineage {
+  requestId: string;
+  providerKind: InferenceResponse["providerKind"];
+  modelId: string;
+  capability: string;
+  schemaVersion: string;
+  policyVersion: string;
+  completedAt: string;
+  objectContentSha256: string;
+}
+
+export type StoredEvidenceExtractionResult =
+  | {
+      status: "READY";
+      artifact: Artifact;
+      factCard: EvidenceFactCard;
+      candidate: ExtractionCandidate;
+      reasonCodes: [];
+      lineage: ExtractionLineage;
+    }
+  | {
+      status: "REVIEW_REQUIRED";
+      artifact: Artifact;
+      factCard: null;
+      candidate: ExtractionCandidate;
+      reasonCodes: Array<"LOW_CONFIDENCE" | "REQUIRED_FIELDS_MISSING">;
+      lineage: ExtractionLineage;
+    };
+
+type ObjectReadPort = {
+  get(context: ActorContext, command: { objectId: string }): Promise<ProviderGetResponse>;
+};
+
+type InferencePort = {
+  infer(context: ActorContext, request: InferenceRequest): Promise<InferenceResponse>;
+};
+
+export class StoredEvidenceExtractionService {
+  readonly #objects: ObjectReadPort;
+  readonly #inference: InferencePort;
+  readonly #spec: ExtractionSpec;
+
+  constructor(dependencies: {
+    objects: ObjectReadPort;
+    inference: InferencePort;
+    spec?: ExtractionSpec;
+  }) {
+    if (!dependencies || typeof dependencies.objects?.get !== "function" ||
+      typeof dependencies.inference?.infer !== "function") {
+      throw new DomainError("INVALID_EXTRACTION_DEPENDENCY", "Extraction dependencies are invalid.");
+    }
+    this.#objects = dependencies.objects;
+    this.#inference = dependencies.inference;
+    this.#spec = validateSpec(structuredClone(dependencies.spec ?? EYE_EXAM_EXTRACTION_SPEC));
+  }
+
+  async extract(
+    context: ActorContext,
+    command: StoredEvidenceExtractionCommand,
+  ): Promise<StoredEvidenceExtractionResult> {
+    const captured = structuredClone({ context, command });
+    assertActorContext(captured.context);
+    validateCommand(captured.context, captured.command, this.#spec);
+
+    const storedResponse = await this.#objects.get(captured.context, {
+      objectId: captured.command.objectRef.objectId,
+    });
+    const stored = validateStoredObject(storedResponse, captured.command.objectRef);
+
+    const response = await this.#inference.infer(captured.context, {
+      requestId: captured.command.requestId,
+      clinicId: captured.context.clinicId,
+      capability: this.#spec.capability,
+      schemaVersion: this.#spec.schemaVersion,
+      input: {
+        bytes: new Uint8Array(stored.bytes),
+        mediaType: stored.ref.mediaType,
+        contentSha256: stored.ref.contentSha256,
+        kind: captured.command.kind,
+      },
+    });
+    const candidate = validateCandidate(response.output, this.#spec);
+    const artifact: Artifact = {
+      id: captured.command.artifactId,
+      clinicId: captured.context.clinicId,
+      kind: captured.command.kind,
+      occurredAt: captured.command.occurredAt,
+      occurredAtSource: captured.command.occurredAtSource,
+      sourceEmployeeId: captured.context.actorId,
+      identityAnchor: captured.command.identityAnchor,
+      payload: { storedObjectRef: structuredClone(captured.command.objectRef) },
+      createdAt: captured.command.createdAt,
+    };
+    const lineage: ExtractionLineage = {
+      requestId: response.requestId,
+      providerKind: response.providerKind,
+      modelId: response.modelId,
+      capability: this.#spec.capability,
+      schemaVersion: response.schemaVersion,
+      policyVersion: this.#spec.policyVersion,
+      completedAt: response.completedAt,
+      objectContentSha256: stored.ref.contentSha256,
+    };
+    const reasonCodes: Array<"LOW_CONFIDENCE" | "REQUIRED_FIELDS_MISSING"> = [];
+    if (candidate.confidence < this.#spec.minimumConfidence) reasonCodes.push("LOW_CONFIDENCE");
+    if (candidate.missingFields.length > 0) reasonCodes.push("REQUIRED_FIELDS_MISSING");
+    if (reasonCodes.length > 0) {
+      return structuredClone({
+        status: "REVIEW_REQUIRED" as const,
+        artifact,
+        factCard: null,
+        candidate,
+        reasonCodes,
+        lineage,
+      });
+    }
+
+    const factCard: EvidenceFactCard = {
+      id: captured.command.factCardId,
+      clinicId: artifact.clinicId,
+      artifactId: artifact.id,
+      subjectType: candidate.subjectTypeCandidate,
+      identityAnchor: artifact.identityAnchor,
+      workflowFamily: candidate.workflowFamilyCandidate,
+      occurredAt: artifact.occurredAt,
+      fields: structuredClone(candidate.fields),
+      missingFields: [...candidate.missingFields],
+      confidence: candidate.confidence,
+      parserVersion: this.#spec.parserVersion,
+      lineageArtifactIds: [artifact.id],
+    };
+    requireClinicalIdentity(factCard);
+    assertFactCardIdentitySource(factCard, artifact);
+    return structuredClone({
+      status: "READY" as const,
+      artifact,
+      factCard,
+      candidate,
+      reasonCodes: [] as [],
+      lineage,
+    });
+  }
+}
+
+function validateSpec(spec: ExtractionSpec): ExtractionSpec {
+  exactObject(spec, SPEC_KEYS, "INVALID_EXTRACTION_SPEC");
+  if (!nonblank(spec.capability) || !nonblank(spec.schemaVersion) ||
+    !nonblank(spec.policyVersion) || !nonblank(spec.parserVersion) ||
+    spec.artifactKind !== "EXAM_REPORT" || spec.subjectType !== "PATIENT" ||
+    spec.workflowFamily !== "EYE_EXAM" || !Array.isArray(spec.allowedMediaTypes) ||
+    spec.allowedMediaTypes.length !== ALLOWED_MEDIA.length ||
+    !ALLOWED_MEDIA.every((value) => spec.allowedMediaTypes.includes(value)) ||
+    !Array.isArray(spec.requiredFields) || spec.requiredFields.length === 0 ||
+    spec.requiredFields.some((field) => !nonblank(field)) ||
+    new Set(spec.requiredFields).size !== spec.requiredFields.length ||
+    !Number.isFinite(spec.minimumConfidence) || spec.minimumConfidence < 0 ||
+    spec.minimumConfidence > 1) {
+    throw new DomainError("INVALID_EXTRACTION_SPEC", "Extraction specification is invalid.");
+  }
+  return Object.freeze({
+    ...spec,
+    allowedMediaTypes: Object.freeze([...spec.allowedMediaTypes]),
+    requiredFields: Object.freeze([...spec.requiredFields]),
+  });
+}
+
+function validateCommand(
+  context: ActorContext,
+  command: StoredEvidenceExtractionCommand,
+  spec: ExtractionSpec,
+): void {
+  exactObject(command, COMMAND_KEYS, "INVALID_EXTRACTION_COMMAND");
+  if (![command.requestId, command.artifactId, command.factCardId].every(nonblank) ||
+    command.kind !== spec.artifactKind ||
+    !["source", "employee_confirmed", "unknown"].includes(command.occurredAtSource) ||
+    parseStrictIsoInstant(command.createdAt) === null ||
+    (command.occurredAt !== null && parseStrictIsoInstant(command.occurredAt) === null)) {
+    throw new DomainError("INVALID_EXTRACTION_COMMAND", "Extraction command is invalid.");
+  }
+  validateObjectRef(command.objectRef);
+  if (command.objectRef.clinicId !== context.clinicId) {
+    throw new DomainError("TENANT_SCOPE_VIOLATION", "Stored object is outside this clinic scope.");
+  }
+  if (!spec.allowedMediaTypes.includes(command.objectRef.mediaType)) {
+    throw new DomainError("UNSUPPORTED_EVIDENCE_MEDIA_TYPE", "Stored object media type is unsupported.");
+  }
+  if (!nonblank(command.identityAnchor)) {
+    throw new DomainError("IDENTITY_ANCHOR_REQUIRED", "Patient evidence requires an exact identity anchor.");
+  }
+}
+
+function validateStoredObject(response: ProviderGetResponse, expected: StoredObjectRef): ProviderGetResponse {
+  let snapshot: ProviderGetResponse;
+  try {
+    snapshot = structuredClone(response);
+  } catch {
+    throw new DomainError("STORED_OBJECT_MISMATCH", "Stored object response is invalid.");
+  }
+  validateObjectRef(snapshot.ref);
+  if (!(snapshot.bytes instanceof Uint8Array) || snapshot.bytes.byteLength !== expected.sizeBytes ||
+    createHash("sha256").update(snapshot.bytes).digest("hex") !== expected.contentSha256 ||
+    !sameRef(snapshot.ref, expected)) {
+    throw new DomainError("STORED_OBJECT_MISMATCH", "Stored object does not match its trusted reference.");
+  }
+  return snapshot;
+}
+
+function validateObjectRef(ref: StoredObjectRef): void {
+  exactObject(ref, REF_KEYS, "INVALID_STORED_OBJECT_REF");
+  if (!nonblank(ref.clinicId) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ref.objectId) ||
+    !/^[a-f0-9]{64}$/.test(ref.contentSha256) || !Number.isSafeInteger(ref.sizeBytes) ||
+    ref.sizeBytes <= 0 || !nonblank(ref.mediaType)) {
+    throw new DomainError("INVALID_STORED_OBJECT_REF", "Stored object reference is invalid.");
+  }
+}
+
+function validateCandidate(output: unknown, spec: ExtractionSpec): ExtractionCandidate {
+  let candidate: ExtractionCandidate;
+  try {
+    candidate = structuredClone(output) as ExtractionCandidate;
+  } catch {
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate is not cloneable.");
+  }
+  exactObject(candidate, CANDIDATE_KEYS, "INVALID_EXTRACTION_CANDIDATE");
+  if (candidate.subjectTypeCandidate !== spec.subjectType ||
+    candidate.workflowFamilyCandidate !== spec.workflowFamily ||
+    !plainObject(candidate.fields) || Object.keys(candidate.fields).length > MAX_FIELD_COUNT ||
+    !Array.isArray(candidate.missingFields) || !Number.isFinite(candidate.confidence) ||
+    candidate.confidence < 0 || candidate.confidence > 1) {
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate violates the frozen schema.");
+  }
+  validateJson(candidate.fields, 0);
+  if (Buffer.byteLength(JSON.stringify(candidate.fields)) > MAX_FIELDS_JSON_BYTES) {
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate fields are too large.");
+  }
+  if (candidate.missingFields.some((field) => !spec.requiredFields.includes(field)) ||
+    new Set(candidate.missingFields).size !== candidate.missingFields.length ||
+    spec.requiredFields.some((field) => Object.hasOwn(candidate.fields, field) === candidate.missingFields.includes(field))) {
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction missing fields are inconsistent.");
+  }
+  return Object.freeze({
+    ...candidate,
+    fields: structuredClone(candidate.fields),
+    missingFields: Object.freeze([...candidate.missingFields]) as unknown as string[],
+  });
+}
+
+function validateJson(value: unknown, depth: number): void {
+  if (depth > 16) throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate is too deeply nested.");
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return;
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate contains a non-finite number.");
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) validateJson(item, depth + 1);
+    return;
+  }
+  if (!plainObject(value)) {
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate must contain JSON values only.");
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_KEYS.has(key)) {
+      throw new DomainError("EXTRACTION_AUTHORITY_INJECTION", "Model output contains a forbidden authority field.");
+    }
+    validateJson(item, depth + 1);
+  }
+}
+
+function exactObject(value: unknown, keys: string[], code: string): asserts value is Record<string, unknown> {
+  if (!plainObject(value) || Object.keys(value).length !== keys.length ||
+    Object.keys(value).some((key) => !keys.includes(key))) {
+    throw new DomainError(code, "Value must have the exact declared shape.");
+  }
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function nonblank(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function sameRef(left: StoredObjectRef, right: StoredObjectRef): boolean {
+  return left.clinicId === right.clinicId && left.objectId === right.objectId &&
+    left.contentSha256 === right.contentSha256 && left.sizeBytes === right.sizeBytes &&
+    left.mediaType === right.mediaType;
+}

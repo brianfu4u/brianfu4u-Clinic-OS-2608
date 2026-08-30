@@ -92,3 +92,6 @@ as success. See `docs/runbooks/postgres-real-acceptance.md` before running it.
 Original evidence bytes now have a narrow immutable object-store boundary. The On-Prem provider
 uses an explicitly configured absolute local root, atomic no-overwrite writes and integrity checks;
 the gateway enforces a 25 MiB per-object limit. It is not yet wired to Artifact persistence or OCR.
+Stored evidence can now pass through a narrow extraction boundary that assembles a candidate
+Artifact and FactCard after deterministic schema and authority-key validation. The included tests
+use a synthetic local provider only; real OCR/model integration and persistence remain separate.
