@@ -40,6 +40,9 @@ export type AcceptanceConfig = ReturnType<typeof loadConfig>;
 export function loadConfig(environment = process.env) {
   const values = URL_NAMES.map((name) => environment[name]);
   if (values.some((value) => !value)) throw new AcceptanceError("ENVIRONMENT_REQUIRED");
+  if (environment.WO018_ALLOW_DESTRUCTIVE_RESET !== "I_UNDERSTAND_WO018_DATABASES_WILL_BE_DROPPED") {
+    throw new AcceptanceError("DESTRUCTIVE_CONFIRMATION_REQUIRED");
+  }
   let urls: URL[];
   try {
     urls = values.map((value) => new URL(value as string));
@@ -56,9 +59,6 @@ export function loadConfig(environment = process.env) {
     }
   }
   const databaseKey = (url: URL) => `${url.hostname}:${url.port || "5432"}/${url.pathname}`;
-  if (databaseKey(sourceAdmin) === databaseKey(restoreAdmin)) {
-    throw new AcceptanceError("DATABASES_MUST_DIFFER");
-  }
   if (databaseKey(sourceAdmin) !== databaseKey(sourceApp) ||
       databaseKey(restoreAdmin) !== databaseKey(restoreApp)) {
     throw new AcceptanceError("ROLE_DATABASE_MISMATCH");
@@ -75,6 +75,51 @@ export function loadConfig(environment = process.env) {
   };
 }
 
+export async function databaseIdentity(pool: Pool) {
+  const result = await pool.query<{ system_identifier: string; database_oid: string; version: string }>(
+    `SELECT (pg_control_system()).system_identifier::text AS system_identifier,
+            (SELECT oid::text FROM pg_database WHERE datname=current_database()) AS database_oid,
+            current_setting('server_version_num') AS version`,
+  );
+  const row = result.rows[0];
+  if (!row) throw new AcceptanceError("DATABASE_IDENTITY_UNAVAILABLE");
+  return row;
+}
+
+async function connectedDatabase(pool: Pool) {
+  const result = await pool.query<{ database_oid: string; database_name: string; version: string }>(
+    `SELECT (SELECT oid::text FROM pg_database WHERE datname=current_database()) AS database_oid,
+            current_database() AS database_name,
+            current_setting('server_version_num') AS version`,
+  );
+  const row = result.rows[0];
+  if (!row) throw new AcceptanceError("DATABASE_IDENTITY_UNAVAILABLE");
+  return row;
+}
+
+export async function assertDatabaseIdentities(
+  sourceAdmin: Pool, sourceApp: Pool, restoreAdmin: Pool, restoreApp: Pool,
+): Promise<{ sourceMajor: number; restoreMajor: number }> {
+  const [sa, sp, ra, rp] = await Promise.all([
+    databaseIdentity(sourceAdmin), connectedDatabase(sourceApp),
+    databaseIdentity(restoreAdmin), connectedDatabase(restoreApp),
+  ]);
+  if (sa.database_oid !== sp.database_oid || ra.database_oid !== rp.database_oid ||
+      sa.version !== sp.version || ra.version !== rp.version) {
+    throw new AcceptanceError("ROLE_DATABASE_MISMATCH");
+  }
+  if (`${sa.system_identifier}:${sa.database_oid}` === `${ra.system_identifier}:${ra.database_oid}`) {
+    throw new AcceptanceError("DATABASES_MUST_DIFFER");
+  }
+  const sourceMajor = Math.floor(Number(sa.version) / 10_000);
+  const restoreMajor = Math.floor(Number(ra.version) / 10_000);
+  if (![16, 17].includes(sourceMajor) || ![16, 17].includes(restoreMajor)) {
+    throw new AcceptanceError("POSTGRES_VERSION_UNSUPPORTED");
+  }
+  if (sourceMajor !== restoreMajor) throw new AcceptanceError("POSTGRES_VERSION_MISMATCH");
+  return { sourceMajor, restoreMajor };
+}
+
 export async function withClient<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
   const client = await pool.connect();
   try {
@@ -86,18 +131,36 @@ export async function withClient<T>(pool: Pool, operation: (client: PoolClient) 
   }
 }
 
-export async function assertDedicatedEmptyRestore(pool: Pool): Promise<void> {
-  const result = await pool.query<{ tablename: string }>(
-    `SELECT tablename FROM pg_tables
-      WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
-    [BUSINESS_TABLES],
+export async function assertDedicatedEmptyPublic(pool: Pool): Promise<void> {
+  const result = await pool.query(
+    `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f')
+     UNION ALL
+     SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='public'
+     UNION ALL
+     SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+      WHERE n.nspname='public' AND t.typtype IN ('e','d','r','m')
+     UNION ALL
+     SELECT 1 FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace
+      WHERE n.nspname='public'
+     LIMIT 1`,
   );
-  if (result.rows.length !== 0) throw new AcceptanceError("RESTORE_DATABASE_NOT_EMPTY");
+  if (result.rows.length !== 0) throw new AcceptanceError("PUBLIC_SCHEMA_NOT_EMPTY");
 }
 
 export async function resetPublicSchema(pool: Pool): Promise<void> {
-  await pool.query("DROP SCHEMA public CASCADE");
-  await pool.query("CREATE SCHEMA public");
+  await withClient(pool, async (client) => {
+    await client.query("BEGIN");
+    try {
+      await client.query("DROP SCHEMA public CASCADE");
+      await client.query("CREATE SCHEMA public");
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  });
 }
 
 export async function migrate(pool: Pool): Promise<void> {
@@ -227,12 +290,18 @@ export async function runBinary(binary: string, args: string[], url: string): Pr
   });
 }
 
-export async function assertBinaries(): Promise<void> {
+export async function assertBinaries(expectedMajors?: readonly number[]): Promise<{ dump: number; restore: number }> {
+  const majors: number[] = [];
   for (const binary of ["pg_dump", "pg_restore"]) {
     const version = await runBinary(binary, ["--version"], "postgresql://unused:unused@localhost/unused");
     const major = Number(version.match(/(\d+)(?:\.\d+)?/)?.[1]);
     if (major !== 16 && major !== 17) throw new AcceptanceError("POSTGRES_VERSION_UNSUPPORTED");
+    majors.push(major);
   }
+  if (majors[0] !== majors[1] || expectedMajors?.some((major) => major !== majors[0])) {
+    throw new AcceptanceError("POSTGRES_VERSION_MISMATCH");
+  }
+  return { dump: majors[0]!, restore: majors[1]! };
 }
 
 export async function dumpAndRestore(config: AcceptanceConfig, sourceAdmin: Pool): Promise<string> {
@@ -263,6 +332,65 @@ export async function logicalDigests(pool: Pool): Promise<Map<string, { count: n
     });
   }
   return output;
+}
+
+export async function catalogDigest(pool: Pool): Promise<string> {
+  const result = await pool.query<{ kind: string; value: string }>(
+    `SELECT 'constraint' AS kind,
+            c.conrelid::regclass::text || ':' || c.conname || ':' || pg_get_constraintdef(c.oid) AS value
+       FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace
+      WHERE n.nspname='public'
+     UNION ALL
+     SELECT 'policy', schemaname || '.' || tablename || ':' || policyname || ':' || cmd || ':' ||
+            coalesce(qual,'') || ':' || coalesce(with_check,'')
+       FROM pg_policies WHERE schemaname='public'
+     UNION ALL
+     SELECT 'trigger', c.relname || ':' || t.tgname || ':' || pg_get_triggerdef(t.oid)
+       FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+       JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='public' AND NOT t.tgisinternal
+      ORDER BY kind, value`,
+  );
+  return createHash("sha256").update(result.rows.map((row) => `${row.kind}:${row.value}`).join("\n")).digest("hex");
+}
+
+export async function assertTenantIsolationForEveryTable(admin: Pool, app: Pool): Promise<void> {
+  for (const table of BUSINESS_TABLES) {
+    const counts = await admin.query<{ clinic_id: string; count: number }>(
+      `SELECT clinic_id, count(*)::int AS count FROM ${quoteIdentifier(table)}
+        WHERE clinic_id IN ('WO018-A','WO018-B') GROUP BY clinic_id`,
+    );
+    assert.ok(counts.rows.some((row) => row.clinic_id === "WO018-A" && row.count > 0), `${table}: tenant A seed`);
+    assert.ok(counts.rows.some((row) => row.clinic_id === "WO018-B" && row.count > 0), `${table}: tenant B seed`);
+    for (const clinicId of ["WO018-A", "WO018-B"]) {
+      const client = await app.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT set_config('app.clinic_id',$1,true)", [clinicId]);
+        const visible = await client.query<{ clinic_id: string }>(
+          `SELECT clinic_id FROM ${quoteIdentifier(table)}`,
+        );
+        assert.ok(visible.rows.length > 0, `${table}: ${clinicId} visible`);
+        assert.ok(visible.rows.every((row) => row.clinic_id === clinicId), `${table}: tenant leak`);
+        await client.query("ROLLBACK");
+      } finally {
+        client.release();
+      }
+    }
+  }
+}
+
+export async function assertAppendOnlyBehavior(admin: Pool): Promise<void> {
+  for (const table of [
+    "artifact", "workflow_artifact_link", "expectation_transition", "s2_verification", "manager_decision",
+  ]) {
+    await assert.rejects(admin.query(
+      `UPDATE ${quoteIdentifier(table)} SET clinic_id=clinic_id WHERE clinic_id='WO018-A'`,
+    ), `${table}: UPDATE must fail`);
+    await assert.rejects(admin.query(
+      `DELETE FROM ${quoteIdentifier(table)} WHERE clinic_id='WO018-A'`,
+    ), `${table}: DELETE must fail`);
+  }
 }
 
 export function userFromUrl(url: string): string {

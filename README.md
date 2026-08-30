@@ -84,6 +84,7 @@ Real PostgreSQL deployment acceptance is intentionally separate from ordinary te
 npm run accept:postgres-real
 ```
 
-The command requires four explicit dedicated-database URLs and PostgreSQL 16/17 client binaries.
+The command requires four explicit dedicated-database URLs, the destructive-reset confirmation
+documented in the runbook, and same-major PostgreSQL 16/17 server/client binaries.
 It is destructive, fails non-zero when its environment is absent, and never reports a skipped gate
 as success. See `docs/runbooks/postgres-real-acceptance.md` before running it.

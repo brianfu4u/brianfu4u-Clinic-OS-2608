@@ -12,13 +12,17 @@ import { VerificationRepository } from "../src/persistence/verification-reposito
 import { WorkflowAttachRepository } from "../src/persistence/workflow-attach-repository.ts";
 import {
   AcceptanceError,
+  assertAppendOnlyBehavior,
   assertAppendOnlyTriggers,
   assertBinaries,
   assertConnectedRolesDiffer,
-  assertDedicatedEmptyRestore,
+  assertDatabaseIdentities,
+  assertDedicatedEmptyPublic,
   assertNoTenantLeak,
   assertRlsCatalog,
   assertRole,
+  assertTenantIsolationForEveryTable,
+  catalogDigest,
   dumpAndRestore,
   grantApplicationAccess,
   loadConfig,
@@ -45,15 +49,20 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
   let sourceTouched = false;
   let restoreTouched = false;
 
+  let failure: unknown;
   try {
     progress("PREFLIGHT");
-    await assertBinaries();
-    await assertDedicatedEmptyRestore(restoreAdmin);
+    const serverVersions = await assertDatabaseIdentities(sourceAdmin, sourceApp, restoreAdmin, restoreApp);
+    await assertBinaries([serverVersions.sourceMajor, serverVersions.restoreMajor]);
+    await assertDedicatedEmptyPublic(sourceAdmin);
+    await assertDedicatedEmptyPublic(restoreAdmin);
     await assertConnectedRolesDiffer(sourceAdmin, sourceApp);
     await assertConnectedRolesDiffer(restoreAdmin, restoreApp);
     await assertRole(sourceApp, userFromUrl(config.sourceApp));
     await assertRole(restoreApp, userFromUrl(config.restoreApp));
+    // No database may be touched until every source and restore preflight has passed.
     sourceTouched = true;
+    restoreTouched = true;
     await resetPublicSchema(sourceAdmin);
     await migrate(sourceAdmin);
     await grantApplicationAccess(sourceAdmin, config.sourceApp);
@@ -145,12 +154,23 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     assert.ok(mixedResults.some(({ status }) => status === "fulfilled"));
     await assertCoherentChain(sourceAdmin, "WO018-A", "WO018-exp-mix");
 
+    const employeeB = actor("WO018-B", "EMPLOYEE");
+    const managerB = actor("WO018-B", "MANAGER");
+    const completeB = await createCompletedChain(golden, employeeB, "WO018-B-close");
+    await decisions.recordManagerDecision(managerB, {
+      id: "WO018-B-decision", expectationId: completeB.expectationId, action: "CLOSE_STANDARD",
+      reasonCode: null, note: null, decidedAt: "2026-08-30T10:10:00.000Z",
+    });
+    await assertTenantIsolationForEveryTable(sourceAdmin, sourceApp);
+    await assertAppendOnlyBehavior(sourceAdmin);
+
     progress("BACKUP_RESTORE");
     const sourceDigest = await logicalDigests(sourceAdmin);
-    restoreTouched = true;
+    const sourceCatalogDigest = await catalogDigest(sourceAdmin);
     const dumpDigest = await dumpAndRestore(config, sourceAdmin);
     assert.match(dumpDigest, /^[0-9a-f]{64}$/);
     assert.deepEqual(await logicalDigests(restoreAdmin), sourceDigest);
+    assert.equal(await catalogDigest(restoreAdmin), sourceCatalogDigest);
     await assertRlsCatalog(restoreAdmin);
     await assertAppendOnlyTriggers(restoreAdmin);
     await grantApplicationAccess(restoreAdmin, config.restoreApp);
@@ -161,23 +181,27 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     const restored = capturePair("WO018-restored-write", "WO018-P-R", "2026-08-30T11:00:00.000Z");
     await restoredCapture.saveCapture(employee, restored.artifact, restored.factCard);
     assert.equal((await restoredCapture.getArtifact(employee, restored.artifact.id))?.id, restored.artifact.id);
-    progress("PASS");
   } catch (error) {
     const safe = error instanceof AcceptanceError
       ? error
       : new AcceptanceError("REAL_POSTGRES_ACCEPTANCE_FAILED");
     console.error(`[WO018][FAIL] ${safe.code}`);
-    throw safe;
+    failure = safe;
   } finally {
-    await restoreProductPool?.close().catch(() => undefined);
-    await sourceProductPool.close().catch(() => undefined);
-    await sourceApp.end().catch(() => undefined);
-    await restoreApp.end().catch(() => undefined);
-    if (sourceTouched) await resetPublicSchema(sourceAdmin).catch(() => undefined);
-    if (restoreTouched) await resetPublicSchema(restoreAdmin).catch(() => undefined);
-    await sourceAdmin.end().catch(() => undefined);
-    await restoreAdmin.end().catch(() => undefined);
+    const cleanup = await Promise.allSettled([
+      restoreProductPool?.close() ?? Promise.resolve(),
+      sourceProductPool.close(), sourceApp.end(), restoreApp.end(),
+    ]);
+    if (sourceTouched) cleanup.push(await settle(resetPublicSchema(sourceAdmin)));
+    if (restoreTouched) cleanup.push(await settle(resetPublicSchema(restoreAdmin)));
+    cleanup.push(await settle(sourceAdmin.end()), await settle(restoreAdmin.end()));
+    if (cleanup.some(({ status }) => status === "rejected")) {
+      console.error("[WO018][FAIL] CLEANUP_FAILED");
+      failure ??= new AcceptanceError("CLEANUP_FAILED");
+    }
   }
+  if (failure) throw failure;
+  progress("PASS");
 });
 
 function actor(clinicId: string, role: ActorContext["role"]): ActorContext {
@@ -187,13 +211,13 @@ function actor(clinicId: string, role: ActorContext["role"]): ActorContext {
 function capturePair(id: string, identityAnchor: string, occurredAt: string, kind = "REGISTRATION"):
   { artifact: Artifact; factCard: EvidenceFactCard } {
   const artifact: Artifact = {
-    id, clinicId: "WO018-A", kind, occurredAt, occurredAtSource: "source",
+    id, clinicId: identityAnchor.startsWith("WO018-B") ? "WO018-B" : "WO018-A", kind, occurredAt, occurredAtSource: "source",
     sourceEmployeeId: "WO018-employee", identityAnchor, payload: { synthetic: true }, createdAt: occurredAt,
   };
   return {
     artifact,
     factCard: {
-      id: `${id}-fact`, clinicId: "WO018-A", artifactId: id, subjectType: "PATIENT",
+      id: `${id}-fact`, clinicId: artifact.clinicId, artifactId: id, subjectType: "PATIENT",
       identityAnchor, workflowFamily: "PATIENT_VISIT", occurredAt, fields: { synthetic: true },
       missingFields: [], confidence: 1, parserVersion: "WO018", lineageArtifactIds: [id],
     },
@@ -295,4 +319,12 @@ async function assertCoherentChain(admin: Pool, clinicId: string, expectationId:
 
 function progress(label: string): void {
   console.log(`[WO018][${label}]`);
+}
+
+async function settle(promise: Promise<unknown>): Promise<PromiseSettledResult<unknown>> {
+  try {
+    return { status: "fulfilled", value: await promise };
+  } catch (reason) {
+    return { status: "rejected", reason };
+  }
 }

@@ -7,11 +7,13 @@ a development, staging, production or patient-data database. Both database names
 ## Prerequisites
 
 - PostgreSQL Server 16 or 17;
-- matching `pg_dump` and `pg_restore` major version 16 or 17 on `PATH`;
+- source and restore servers on the same supported major (16 or 17);
+- `pg_dump` and `pg_restore` on that same major and on `PATH`;
 - two different empty dedicated databases;
 - one admin LOGIN and one non-owner application LOGIN for each database;
 - application roles must be `NOSUPERUSER NOBYPASSRLS`;
-- admin roles must be able to migrate, grant and reset the dedicated public schemas.
+- admin roles must be able to migrate, grant and reset the dedicated public schemas, and execute
+  `pg_control_system()` so the harness can compare real cluster/database identities.
 
 Use disposable credentials and export all four URLs without printing them:
 
@@ -20,12 +22,14 @@ export WO018_SOURCE_ADMIN_URL='postgresql://.../clinic_source_wo018_acceptance'
 export WO018_SOURCE_APP_URL='postgresql://.../clinic_source_wo018_acceptance'
 export WO018_RESTORE_ADMIN_URL='postgresql://.../clinic_restore_wo018_acceptance'
 export WO018_RESTORE_APP_URL='postgresql://.../clinic_restore_wo018_acceptance'
+export WO018_ALLOW_DESTRUCTIVE_RESET='I_UNDERSTAND_WO018_DATABASES_WILL_BE_DROPPED'
 npm run accept:postgres-real
 ```
 
 The source and restore URLs for one database must use different roles. The source and restore
-database names must differ. The restore database must contain none of the Clinic OS business
-tables before the command starts.
+database names must differ. Before anything is changed, both `public` schemas must contain no user
+tables, partitioned tables, views, materialized views, sequences, foreign tables, functions,
+user-defined types, or extensions (including extension-owned objects).
 
 ## What it changes
 
@@ -39,7 +43,7 @@ Loss of those dedicated databases is therefore expected and intentional.
 
 ## Required result
 
-Success ends with `[WO018][PASS]` and a zero exit status. Any missing URL, binary, unsafe database
+Success ends with `[WO018][PASS]` only after both schema resets and every pool close succeed. Any missing URL, binary, unsafe database
 name, role violation, failed RLS/concurrency assertion or backup mismatch exits non-zero with a
 stable acceptance code. URLs, passwords, row payloads and raw database errors are not printed.
 
