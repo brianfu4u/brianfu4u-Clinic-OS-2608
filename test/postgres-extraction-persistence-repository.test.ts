@@ -162,8 +162,45 @@ test("runtime shape, candidate authority, state contradictions and manifest hash
     contradiction.status = "REVIEW_REQUIRED"; cases.push(contradiction);
     const badHash = ready(); badHash.lineage.modelManifestSha256 = "bad"; cases.push(badHash);
     const badJson = ready(); (badJson.candidate.fields as Record<string, unknown>).bad = Number.NaN; cases.push(badJson);
+    const extraLineage = ready(); extraLineage.factCard.lineageArtifactIds.push("forged-extra");
+    const replacedLineage = ready(); replacedLineage.factCard.lineageArtifactIds = ["nonexistent"];
     const before = pool.acquisitions;
     for (const value of cases) await assert.rejects(repository.saveExtraction(context(), ref(), value));
+    await assert.rejects(repository.saveExtraction(context(), ref(), extraLineage), code("FACT_CARD_LINEAGE_INVALID"));
+    await assert.rejects(repository.saveExtraction(context(), ref(), replacedLineage), code("FACT_CARD_LINEAGE_INVALID"));
+    assert.equal(pool.acquisitions, before);
+  } finally { await pool.close(); }
+});
+
+test("top-level and nested accessors or proxies are rejected without trap execution or acquisition", async () => {
+  const pool = new PoolShim(); await pool.migrate();
+  try {
+    const repository = new ExtractionPersistenceRepository(pool);
+    let executions = 0;
+    const topGetter = ready();
+    const topCandidate = topGetter.candidate;
+    Object.defineProperty(topGetter, "candidate", { get() { executions += 1; return topCandidate; } });
+    const nestedGetter = ready();
+    Object.defineProperty(nestedGetter.candidate.fields, "reportType", {
+      get() { executions += 1; return "EYE_EXAM"; }, enumerable: true,
+    });
+    const nestedProxy = ready();
+    nestedProxy.candidate.fields = new Proxy(nestedProxy.candidate.fields, {
+      get(target, key, receiver) { executions += 1; return Reflect.get(target, key, receiver); },
+      ownKeys(target) { executions += 1; return Reflect.ownKeys(target); },
+    });
+    const topProxy = new Proxy(ready(), {
+      get(target, key, receiver) { executions += 1; return Reflect.get(target, key, receiver); },
+      ownKeys(target) { executions += 1; return Reflect.ownKeys(target); },
+    });
+    const before = pool.acquisitions;
+    for (const hostile of [topGetter, nestedGetter, nestedProxy, topProxy]) {
+      await assert.rejects(
+        repository.saveExtraction(context(), ref(), hostile),
+        code("INVALID_EXTRACTION_PERSISTENCE_INPUT"),
+      );
+    }
+    assert.equal(executions, 0);
     assert.equal(pool.acquisitions, before);
   } finally { await pool.close(); }
 });

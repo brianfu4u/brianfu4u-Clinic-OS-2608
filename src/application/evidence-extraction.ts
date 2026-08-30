@@ -42,6 +42,8 @@ const MAX_FIELDS_JSON_BYTES = 64 * 1024;
 const MAX_CANDIDATE_ARRAY_LENGTH = 256;
 const MAX_CANDIDATE_NODES = 4096;
 const MAX_CANDIDATE_STRING_BYTES = 64 * 1024;
+const MAX_PERSISTENCE_INPUT_NODES = 16_384;
+const MAX_PERSISTENCE_INPUT_STRING_BYTES = 256 * 1024;
 
 export interface ExtractionSpec {
   capability: string;
@@ -386,45 +388,76 @@ function assertSafeCandidateData(
   budget: { nodes: number; stringBytes: number },
 ): void {
   try {
-    budget.nodes += 1;
-    if (depth > 16 || budget.nodes > MAX_CANDIDATE_NODES) throw new Error();
-    if (typeof value === "string") {
-      budget.stringBytes += Buffer.byteLength(value);
-      if (budget.stringBytes > MAX_CANDIDATE_STRING_BYTES) throw new Error();
-      return;
-    }
-    if (value === null || typeof value === "boolean") return;
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) throw new Error();
-      return;
-    }
-    if (typeof value !== "object" || types.isProxy(value)) throw new Error();
-    const array = Array.isArray(value);
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) throw new Error();
-    if (array && value.length > MAX_CANDIDATE_ARRAY_LENGTH) throw new Error();
-    const keys = Reflect.ownKeys(value);
-    if (keys.some((key) => typeof key === "symbol")) throw new Error();
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (array) {
-      if (Object.keys(descriptors).some((key) => key !== "length" && !/^(0|[1-9]\d*)$/.test(key))) throw new Error();
-      for (let index = 0; index < value.length; index += 1) {
-        if (!Object.hasOwn(descriptors, String(index))) throw new Error();
-      }
-    }
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (key === "length" && array) continue;
-      if (!Object.hasOwn(descriptor, "value")) throw new Error();
-      budget.stringBytes += Buffer.byteLength(key);
-      if (budget.stringBytes > MAX_CANDIDATE_STRING_BYTES) throw new Error();
-      if (FORBIDDEN_KEYS.has(key)) {
-        throw new DomainError("EXTRACTION_AUTHORITY_INJECTION", "Model output contains a forbidden authority field.");
-      }
-      assertSafeCandidateData(descriptor.value, depth + 1, budget);
-    }
+    assertInertData(value, depth, budget, {
+      maxNodes: MAX_CANDIDATE_NODES,
+      maxStringBytes: MAX_CANDIDATE_STRING_BYTES,
+      maxArrayLength: MAX_CANDIDATE_ARRAY_LENGTH,
+      rejectAuthority: true,
+    });
   } catch (error) {
     if (error instanceof DomainError) throw error;
     throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate must be inert JSON data.");
+  }
+}
+
+export function snapshotInertExtractionInput<T>(value: T): T {
+  try {
+    assertInertData(value, 0, { nodes: 0, stringBytes: 0 }, {
+      maxNodes: MAX_PERSISTENCE_INPUT_NODES,
+      maxStringBytes: MAX_PERSISTENCE_INPUT_STRING_BYTES,
+      maxArrayLength: 1024,
+      rejectAuthority: false,
+    });
+    return structuredClone(value);
+  } catch {
+    throw new DomainError(
+      "INVALID_EXTRACTION_PERSISTENCE_INPUT",
+      "Extraction persistence input must be bounded inert JSON data.",
+    );
+  }
+}
+
+function assertInertData(
+  value: unknown,
+  depth: number,
+  budget: { nodes: number; stringBytes: number },
+  limits: { maxNodes: number; maxStringBytes: number; maxArrayLength: number; rejectAuthority: boolean },
+): void {
+  budget.nodes += 1;
+  if (depth > 16 || budget.nodes > limits.maxNodes) throw new Error();
+  if (typeof value === "string") {
+    budget.stringBytes += Buffer.byteLength(value);
+    if (budget.stringBytes > limits.maxStringBytes) throw new Error();
+    return;
+  }
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error();
+    return;
+  }
+  if (typeof value !== "object" || types.isProxy(value)) throw new Error();
+  const array = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) throw new Error();
+  if (array && value.length > limits.maxArrayLength) throw new Error();
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === "symbol")) throw new Error();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (array) {
+    if (Object.keys(descriptors).some((key) => key !== "length" && !/^(0|[1-9]\d*)$/.test(key))) throw new Error();
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(descriptors, String(index))) throw new Error();
+    }
+  }
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (key === "length" && array) continue;
+    if (!Object.hasOwn(descriptor, "value")) throw new Error();
+    budget.stringBytes += Buffer.byteLength(key);
+    if (budget.stringBytes > limits.maxStringBytes) throw new Error();
+    if (limits.rejectAuthority && FORBIDDEN_KEYS.has(key)) {
+      throw new DomainError("EXTRACTION_AUTHORITY_INJECTION", "Model output contains a forbidden authority field.");
+    }
+    assertInertData(descriptor.value, depth + 1, budget, limits);
   }
 }
 

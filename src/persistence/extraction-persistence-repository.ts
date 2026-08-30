@@ -1,5 +1,6 @@
 import {
   EYE_EXAM_EXTRACTION_SPEC,
+  snapshotInertExtractionInput,
   validateExtractionCandidateBoundary,
   validateExtractionSpec,
   type ExtractionCandidate,
@@ -94,7 +95,7 @@ export class ExtractionPersistenceRepository {
   ): Promise<StoredEvidenceExtractionResult> {
     let captured: { context: ActorContext; objectRef: StoredObjectRef; result: StoredEvidenceExtractionResult };
     try {
-      captured = structuredClone({ context, objectRef, result });
+      captured = snapshotInertExtractionInput({ context, objectRef, result });
       validateExtraction(captured.context, captured.objectRef, captured.result, this.#spec);
     } catch (error) {
       if (error instanceof DomainError) throw error;
@@ -189,6 +190,13 @@ function validateExtraction(
       result.factCard.confidence < 0 || result.factCard.confidence > 1 ||
       (result.factCard.occurredAt !== null && parseStrictIsoInstant(result.factCard.occurredAt) === null)) {
       throw new DomainError("INVALID_EXTRACTION_PERSISTENCE_INPUT", "Extraction FactCard is invalid.");
+    }
+    if (result.factCard.lineageArtifactIds.length !== 1 ||
+      result.factCard.lineageArtifactIds[0] !== result.artifact.id) {
+      throw new DomainError(
+        "FACT_CARD_LINEAGE_INVALID",
+        "Extraction FactCard lineage must contain only its source Artifact.",
+      );
     }
     validateCapture(context, result.artifact, result.factCard);
     if (result.factCard.subjectType !== candidate.subjectTypeCandidate ||
