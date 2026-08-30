@@ -1,6 +1,6 @@
 # WO-023 — Extract, Persist, and Process the Golden Path
 
-**Status:** ARCHITECTURE FROZEN / BUILDER READY / REVIEW FIX IN PROGRESS
+**Status:** Accepted — Architecture Review passed 2026-08-30
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -282,3 +282,16 @@ Architecture Review must inspect implementation (not only tests) for:
 - stage errors are not swallowed and immutable rows are never deleted;
 - all tenant reads and returned projections are detached and bounded;
 - no hidden HTTP/UI/queue/ORM/dependency scope.
+
+## 12. Architecture acceptance
+
+Accepted after commits `60a1800`, `133d76c`, and `deb59d5`, followed by independent review.
+
+- Full regression: 315/315.
+- Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present in this environment.
+- Review fixes included durable operation identity (`expectationId` and requested FactCard ID) and
+  a database-level READY binding check; old unbound migration state fails closed.
+- No HTTP/UI/queue/worker scope added; GitHub push remains deferred for the batch release.
