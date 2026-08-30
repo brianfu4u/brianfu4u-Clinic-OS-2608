@@ -298,6 +298,14 @@ test("SQL rejects broken composite lineage and READY/REVIEW contradictions", asy
        '{LOW_CONFIDENCE}',provider_kind,model_id,model_manifest_sha256,capability,schema_version,
        policy_version,parser_version,completed_at,consequence_expectation_id,requested_fact_card_id
        FROM evidence_extraction_attempt WHERE request_id='request-a'`));
+    await assert.rejects(pool.db.query(`INSERT INTO evidence_extraction_attempt
+      (clinic_id,request_id,object_id,object_content_sha256,artifact_id,fact_card_id,status,candidate,
+       reason_codes,provider_kind,model_id,model_manifest_sha256,capability,schema_version,policy_version,
+       parser_version,completed_at,consequence_expectation_id,requested_fact_card_id)
+      SELECT clinic_id,'requested-fact-mismatch',object_id,object_content_sha256,artifact_id,fact_card_id,
+       'READY',candidate,'{}',provider_kind,model_id,model_manifest_sha256,capability,schema_version,
+       policy_version,parser_version,completed_at,consequence_expectation_id,'different-fact-card'
+       FROM evidence_extraction_attempt WHERE request_id='request-a'`));
     await pool.db.query(`INSERT INTO stored_object_ref
       (clinic_id,object_id,content_sha256,size_bytes,media_type)
       VALUES ('clinic-b','object-a',$1,123,'image/png')`, ["b".repeat(64)]);
