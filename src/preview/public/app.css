@@ -39,6 +39,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .work-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .work-fields label { display: grid; gap: .25rem; }
 .work-fields input, .work-fields select { padding: .55rem; }
+.evidence-control { grid-column: 1 / -1; display: grid; gap: .25rem; padding: .75rem; background: #eef7f5; border: 1px solid #c4dfd9; border-radius: .6rem; }
+.evidence-control input[type="file"] { background: #fff; padding: .55rem; }
+.evidence-status { padding: .75rem 1rem; border-radius: .6rem; margin: 1rem 0; }
+.evidence-status.success { color: #0c5a4f; background: #e0f3ed; }
+.evidence-status.review { color: #713737; background: #fbe4e4; }
+.evidence-control input:disabled { cursor: not-allowed; opacity: .65; }
 .cards { display: grid; gap: 1rem; }
 .card { background: #fff; border: 1px solid #d5dfe2; border-radius: .75rem; padding: 1rem; }
 .card.review { border-left: .4rem solid #b33a3a; }

@@ -10,6 +10,12 @@ const strings = {
     action: "店長アクション", reason: "理由コード", note: "任意メモ", decide: "決定を記録", latest: "最新決定",
     expectation: "予期", verification: "S2検証",
     hybrid: "PostgreSQL臨床チェーンは永続化・会話と勤務状態は再起動で消去",
+    evidenceFile: "証拠ファイル（PNG/JPEG/PDF）", evidenceHelp: "このファイルはサーバーで保存・抽出されます。",
+    evidenceUnavailable: "永続化された証拠アップロードはこの合成プレビューでは利用できません。",
+    missingExpectation: "先に同じ合成IDのREGISTRATIONを記録してください。",
+    chooseEvidence: "PNG、JPEG、またはPDFファイルを選択してください。",
+    evidenceCompleted: "証拠を処理しました", extractionReview: "証拠の抽出に確認が必要です。", compositionReview: "ワークフロー照合に確認が必要です。",
+    networkError: "プレビューサービスに接続できませんでした。もう一度お試しください。",
   },
   zh: {
     product: "Clinic OS · 合成数据预览", employee: "员工端", manager: "店长端",
@@ -22,6 +28,12 @@ const strings = {
     action: "店长操作", reason: "原因代码", note: "可选备注", decide: "记录决定", latest: "最近决定",
     expectation: "预期状态", verification: "S2验证",
     hybrid: "PostgreSQL临床链持久化；对话和工作状态重启后清空",
+    evidenceFile: "证据文件（PNG/JPEG/PDF）", evidenceHelp: "文件将由服务器保存并进行抽取。",
+    evidenceUnavailable: "合成预览不提供持久化证据上传。",
+    missingExpectation: "请先记录同一合成编号的REGISTRATION。",
+    chooseEvidence: "请选择PNG、JPEG或PDF文件。",
+    evidenceCompleted: "证据已处理", extractionReview: "证据抽取需要复核。", compositionReview: "工作流匹配需要复核。",
+    networkError: "无法连接预览服务，请重试。",
   },
   en: {
     product: "Clinic OS · Synthetic preview", employee: "Employee", manager: "Manager",
@@ -34,6 +46,12 @@ const strings = {
     action: "Manager action", reason: "Reason code", note: "Optional note", decide: "Record decision", latest: "Latest decision",
     expectation: "Expectation", verification: "S2 verification",
     hybrid: "PostgreSQL clinical chain is durable; chat and work status reset on restart",
+    evidenceFile: "Evidence file (PNG/JPEG/PDF)", evidenceHelp: "The server will store and extract this file.",
+    evidenceUnavailable: "Durable evidence upload is unavailable in the synthetic preview.",
+    missingExpectation: "Record a REGISTRATION for the same synthetic ID first.",
+    chooseEvidence: "Choose a PNG, JPEG, or PDF evidence file.",
+    evidenceCompleted: "Evidence processed", extractionReview: "Evidence extraction needs review.", compositionReview: "Workflow matching needs review.",
+    networkError: "The preview service could not be reached. Please try again.",
   },
 };
 
@@ -45,18 +63,51 @@ let managerFilter = "all";
 const expectationByAnchor = new Map();
 const pendingDecisionKeys = new Map();
 let postgresClinical = false;
+let evidenceStatus = null;
 const app = document.querySelector("#app");
 const t = (key) => strings[language][key];
 const previewNotice = () => `${t("synthetic")}${postgresClinical ? ` ${t("hybrid")}` : ""}`;
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: options.body ? { "content-type": "application/json", ...options.headers } : options.headers,
-  });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.message || body.error);
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const headers = { ...(options.headers || {}) };
+  if (options.body && !isFormData && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
+    headers["content-type"] = "application/json";
+  }
+  let response;
+  let body;
+  try {
+    response = await fetch(path, { ...options, headers });
+    const text = await response.text();
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(t("networkError"));
+  }
+  if (!response.ok) throw new Error(safeServerError(body?.error, response.status));
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error(t("networkError"));
   return body;
+}
+
+function safeServerError(code, status) {
+  const messages = {
+    PERSISTED_UPLOAD_UNAVAILABLE: "Durable evidence upload is unavailable in this preview.",
+    PERSISTED_TRANSPORT_UNAVAILABLE: "Durable evidence extraction is unavailable in this preview.",
+    INVALID_UPLOAD: "The selected evidence could not be accepted.",
+    UNSUPPORTED_CONTENT_TYPE: "Select a PNG, JPEG, or PDF evidence file.",
+    UPLOAD_TOO_LARGE: "The selected evidence file is too large.",
+    UPLOAD_TIMEOUT: "Evidence upload timed out. Please retry the exact operation.",
+    UPLOAD_CONFLICT: "This evidence upload conflicts with an existing operation.",
+    UPLOAD_UNAVAILABLE: "Evidence storage is temporarily unavailable.",
+    INVALID_IDEMPOTENCY_KEY: "The operation could not be started. Please retry.",
+    IDEMPOTENCY_KEY_MISMATCH: "The operation could not be started. Please retry.",
+    INVALID_REQUEST: "The request could not be accepted.",
+    REQUEST_TOO_LARGE: "The request is too large.",
+    REQUEST_TIMEOUT: "The operation timed out. Please retry the exact operation.",
+    REQUEST_CONFLICT: "This operation conflicts with an existing operation.",
+    EVIDENCE_UNAVAILABLE: "The stored evidence is unavailable.",
+    FORBIDDEN: "This operation is not permitted.",
+  };
+  return messages[code] || (status >= 500 ? "The preview service is temporarily unavailable." : "The operation could not be completed.");
 }
 
 function languageButtons() {
@@ -91,6 +142,7 @@ function renderEmployee() {
     </aside>
     <main class="main"><div class="topbar"><h2>${escapeHtml(topic?.title || t("employee"))}</h2>${languageButtons()}</div>
       <p class="notice">${previewNotice()}</p>
+      ${evidenceStatus ? evidenceStatusMarkup() : ""}
       <section class="thread" aria-label="Message thread">${messages.map((message) => `<div class="message ${message.role === "EMPLOYEE" ? "employee" : ""}">${escapeHtml(message.text)}</div>`).join("") || `<p class="empty">${t("newTopic")}</p>`}</section>
       ${topic ? composer() : ""}
     </main></div>`;
@@ -135,6 +187,11 @@ function composer() {
       <label>${t("anchor")}<input name="identityAnchor" value="DEMO-001" required></label>
       <label>${t("family")}<input name="workflowFamily" value="EYE_EXAM" readonly></label>
       <label>${t("occurredAt")}<input name="occurredAt" type="datetime-local" value="${local}" required></label>
+      <div class="evidence-control" data-evidence-control hidden>
+        <label for="evidence-file">${t("evidenceFile")}</label>
+        <input id="evidence-file" name="evidenceFile" type="file" accept="image/png,image/jpeg,application/pdf" disabled>
+        <p class="muted" data-evidence-help></p>
+      </div>
     </div>
     <label for="message-text">${t("message")}</label><textarea id="message-text" name="text" required></textarea>
     <button class="primary" type="submit">${t("send")}</button><p id="form-error" role="alert"></p>
@@ -146,7 +203,9 @@ function bindComposer() {
   if (!form) return;
   form.querySelectorAll('[name="mode"]').forEach((radio) => radio.addEventListener("change", () => {
     form.querySelector(".work-fields").hidden = form.elements.mode.value !== "work";
+    updateEvidenceControl(form);
   }));
+  form.elements.kind.addEventListener("change", () => updateEvidenceControl(form));
   form.addEventListener("input", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("change", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("submit", async (event) => {
@@ -156,6 +215,10 @@ function bindComposer() {
       if (data.get("mode") === "work") {
         const identityAnchor = data.get("identityAnchor");
         const kind = data.get("kind");
+        if (kind === "EXAM_REPORT") {
+          await submitExamReport(form, data, identityAnchor);
+          return;
+        }
         form.dataset.idempotencyKey ||= crypto.randomUUID();
         const result = await api("/api/employee/work-updates", { method: "POST", headers: {
           "idempotency-key": form.dataset.idempotencyKey,
@@ -173,9 +236,136 @@ function bindComposer() {
       }
       await loadEmployee();
     } catch (error) {
-      form.querySelector("#form-error").textContent = error.message;
+      form.querySelector("#form-error").textContent = error instanceof Error ? error.message : t("networkError");
     }
   });
+  updateEvidenceControl(form);
+}
+
+function updateEvidenceControl(form) {
+  const control = form.querySelector("[data-evidence-control]");
+  const file = form.elements.evidenceFile;
+  const help = form.querySelector("[data-evidence-help]");
+  const report = form.elements.kind.value === "EXAM_REPORT" && form.elements.mode.value === "work";
+  control.hidden = !report;
+  file.disabled = !report || !postgresClinical;
+  help.textContent = report
+    ? postgresClinical ? t("evidenceHelp") : t("evidenceUnavailable")
+    : "";
+}
+
+async function submitExamReport(form, data, identityAnchor) {
+  if (!postgresClinical) {
+    throw new Error(t("evidenceUnavailable"));
+  }
+  const expectationId = expectationByAnchor.get(identityAnchor);
+  if (!expectationId) {
+    throw new Error(t("missingExpectation"));
+  }
+  const file = data.get("evidenceFile");
+  if (!(file instanceof File) || file.size <= 0) {
+    throw new Error(t("chooseEvidence"));
+  }
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  form.querySelector("#form-error").textContent = "";
+  try {
+    const uploadKey = `upload:${crypto.randomUUID()}`;
+    const uploadBody = new FormData();
+    uploadBody.append("file", file, safeUploadFilename(file));
+    const uploaded = await api("/api/employee/evidence-objects", {
+      method: "POST",
+      headers: { "idempotency-key": uploadKey },
+      body: uploadBody,
+    });
+    const objectRef = validateUploadProjection(uploaded);
+    const requestId = `extract:${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    const occurredAt = new Date(data.get("occurredAt")).toISOString();
+    const result = await api("/api/employee/extraction/exam-report", {
+      method: "POST",
+      headers: { "idempotency-key": requestId },
+      body: JSON.stringify({
+        requestId,
+        artifactId: `artifact:${crypto.randomUUID()}`,
+        factCardId: `fact:${crypto.randomUUID()}`,
+        objectRef,
+        occurredAt,
+        occurredAtSource: "employee_confirmed",
+        identityAnchor,
+        createdAt: now,
+        expectationId,
+        attachedAt: now,
+        evaluatedAt: now,
+      }),
+    });
+    evidenceStatus = validateExtractionProjection(result);
+    await loadEmployee();
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function safeUploadFilename(file) {
+  if (file.type === "image/png") return "evidence.png";
+  if (file.type === "image/jpeg") return "evidence.jpg";
+  return "evidence.pdf";
+}
+
+function validateUploadProjection(value) {
+  if (!isPlainObject(value) || exactKeys(value, ["objectRef", "status"]) === false || value.status !== "STORED" ||
+      !isPlainObject(value.objectRef) || !exactKeys(value.objectRef, ["contentSha256", "mediaType", "objectId", "sizeBytes"]) ||
+      !/^upload-[a-f0-9]{64}$/.test(value.objectRef.objectId) || !/^[a-f0-9]{64}$/.test(value.objectRef.contentSha256) ||
+      !Number.isSafeInteger(value.objectRef.sizeBytes) || value.objectRef.sizeBytes <= 0 || value.objectRef.sizeBytes > 25 * 1024 * 1024 ||
+      !["image/png", "image/jpeg", "application/pdf"].includes(value.objectRef.mediaType)) {
+    throw new Error(t("networkError"));
+  }
+  return {
+    objectId: value.objectRef.objectId,
+    contentSha256: value.objectRef.contentSha256,
+    sizeBytes: value.objectRef.sizeBytes,
+    mediaType: value.objectRef.mediaType,
+  };
+}
+
+function validateExtractionProjection(value) {
+  if (!isPlainObject(value) || !exactKeys(value, ["artifactId", "expectationId", "expectationState", "reasonCodes", "reviewStage", "status", "verificationStatus", "workflowId"]) ||
+      !["COMPLETED", "REVIEW_REQUIRED"].includes(value.status) ||
+      !Array.isArray(value.reasonCodes) || value.reasonCodes.length > 16 || value.reasonCodes.some((reason) => typeof reason !== "string" || reason.length > 64) ||
+      (value.artifactId !== null && !isBoundedId(value.artifactId))) {
+    throw new Error(t("networkError"));
+  }
+  if (value.status === "COMPLETED") {
+    if (value.reviewStage !== null || !isBoundedId(value.workflowId) || !isBoundedId(value.expectationId) ||
+        !["OPEN", "MET", "UNMET", "VOIDED"].includes(value.expectationState) ||
+        !["PENDING", "VERIFIED", "CONFLICT"].includes(value.verificationStatus)) throw new Error(t("networkError"));
+    return { status: "COMPLETED", expectationState: value.expectationState, verificationStatus: value.verificationStatus };
+  }
+  if (!["EXTRACTION", "COMPOSITION"].includes(value.reviewStage) || value.workflowId !== null || value.expectationId !== null ||
+      value.expectationState !== null || value.verificationStatus !== null) throw new Error(t("networkError"));
+  return { status: "REVIEW_REQUIRED", reviewStage: value.reviewStage, reasonCodes: [...value.reasonCodes] };
+}
+
+function evidenceStatusMarkup() {
+  if (evidenceStatus.status === "COMPLETED") {
+    return `<p class="evidence-status success" role="status">${t("evidenceCompleted")} · ${t("expectation")}: <strong>${escapeHtml(evidenceStatus.expectationState)}</strong> · ${t("verification")}: <strong>${escapeHtml(evidenceStatus.verificationStatus)}</strong></p>`;
+  }
+  const label = evidenceStatus.reviewStage === "EXTRACTION" ? t("extractionReview") : t("compositionReview");
+  return `<p class="evidence-status review" role="status">${label}${evidenceStatus.reasonCodes.length ? ` · ${evidenceStatus.reasonCodes.map(escapeHtml).join(", ")}` : ""}</p>`;
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function exactKeys(value, expected) {
+  const actual = Object.keys(value).sort();
+  const keys = [...expected].sort();
+  return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+}
+
+function isBoundedId(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
 }
 
 async function loadManager() {

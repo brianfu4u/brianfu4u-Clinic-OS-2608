@@ -132,3 +132,11 @@ The persisted preview also accepts one bounded employee evidence upload at
 (PNG, JPEG or PDF) with an `Idempotency-Key`; the response contains only the server-derived
 `objectRef` needed by the extraction route. Synthetic preview deliberately returns
 `PERSISTED_UPLOAD_UNAVAILABLE` instead of pretending that an upload is durable.
+
+In the PostgreSQL preview, the employee page wires the same sequence into the browser: record a
+synthetic `REGISTRATION`, choose `EXAM_REPORT`, select one PNG/JPEG/PDF, then upload and extract.
+The page keeps the returned reference and server-issued Expectation ID only in memory, shows only
+bounded completion/review status, and leaves closure state to the existing manager projection.
+Refreshing the page clears the preview's volatile Expectation prerequisite map; submit the
+registration again when the page asks for it. Ordinary Conversation mode never calls either
+clinical endpoint.
