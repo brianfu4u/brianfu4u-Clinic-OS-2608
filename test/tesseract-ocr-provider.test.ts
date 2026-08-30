@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -16,6 +17,7 @@ import {
   TesseractProcessFailure,
   createNodeTesseractProcessRunner,
   parseTesseractTsv,
+  validateTesseractCheckedInManifestSync,
 } from "../src/runtime/tesseract-ocr-provider.ts";
 
 const CONTEXT: ActorContext = { clinicId: "clinic-1", actorId: "employee-1", role: "EMPLOYEE" };
@@ -72,6 +74,32 @@ test("production config rejects runner and manifest trust injection", () => {
   assert.equal(FROZEN_TESSERACT_MANIFEST.modelId, TESSERACT_OCR_MODEL_ID);
   assert.equal(FROZEN_TESSERACT_MANIFEST.minimumHardware, "x86_64 CPU; 512 MiB available memory");
   assert.equal(FROZEN_TESSERACT_MANIFEST.offlinePackageReference, "clinic-os-tesseract-eng-v1");
+});
+
+test("checked-in Tesseract manifest is exact, hashed and fail-closed on mutation or replacement", async (t) => {
+  const source = new URL("../models/tesseract-eng-v1.manifest.json", import.meta.url);
+  // /tmp is intentionally world-writable and therefore rejected by the same
+  // complete-ancestry gate used in production. Use the root-owned system
+  // state area for this positive-path fixture.
+  const root = await mkdtemp("/var/lib/clinic-os-manifest-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const valid = join(root, "models", "tesseract-eng-v1.manifest.json");
+  await mkdir(join(root, "models"), { recursive: true });
+  await copyFile(source, valid);
+  assert.doesNotThrow(() => validateTesseractCheckedInManifestSync(valid));
+
+  await writeFile(valid, `${await readFile(valid, "utf8")}\n`);
+  assert.throws(() => validateTesseractCheckedInManifestSync(valid), hasCode("OCR_MODEL_INTEGRITY_FAILED"));
+
+  const missing = join(root, "missing", "tesseract-eng-v1.manifest.json");
+  assert.throws(() => validateTesseractCheckedInManifestSync(missing),
+    (error) => error instanceof DomainError && ["OCR_MODEL_UNAVAILABLE", "OCR_MODEL_INTEGRITY_FAILED"].includes(error.code));
+
+  const replaced = join(root, "replaced", "tesseract-eng-v1.manifest.json");
+  await mkdir(join(root, "replaced"), { recursive: true });
+  await symlink(source, replaced);
+  assert.throws(() => validateTesseractCheckedInManifestSync(replaced),
+    (error) => error instanceof DomainError && ["OCR_MODEL_UNAVAILABLE", "OCR_MODEL_INTEGRITY_FAILED"].includes(error.code));
 });
 
 test("TSV parser recognizes bounded markers and derives confidence", () => {

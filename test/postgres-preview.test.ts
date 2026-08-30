@@ -318,7 +318,9 @@ test("configured postgres startup validates all frozen OCR assets before creatin
   };
   assert.throws(
     () => createConfiguredPreviewServer(env),
-    (error) => error instanceof Error && (error as Error & { code?: string }).code === "OCR_MODEL_UNAVAILABLE",
+    (error) => error instanceof Error && ["OCR_MODEL_UNAVAILABLE", "OCR_MODEL_INTEGRITY_FAILED"].includes(
+      (error as Error & { code?: string }).code ?? "",
+    ),
   );
 
   const sourceExecutable = process.env.WO021_TESSERACT_PATH ?? "/usr/bin/tesseract";

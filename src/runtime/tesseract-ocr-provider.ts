@@ -66,6 +66,13 @@ export const FROZEN_TESSERACT_MANIFEST: Readonly<TesseractModelManifest> = Objec
   offlinePackageReference: "clinic-os-tesseract-eng-v1",
 });
 
+const TESSERACT_MANIFEST_KEYS = Object.freeze([
+  "engTraineddataSha256", "engineName", "engineVersion", "executableSha256",
+  "language", "leptonicaVersion", "licenseSpdx", "manifestVersion", "minimumHardware",
+  "modelId", "offlinePackageReference", "purpose", "rollbackModelId", "schemaVersion",
+  "tsvConfigSha256",
+] as const);
+
 export interface TesseractProcessInvocation {
   executable: string;
   args: readonly string[];
@@ -432,6 +439,69 @@ export function validateTesseractAssetPathChainSync(
       try { closeSync(fd); } catch { /* best effort */ }
     }
   }
+}
+
+/**
+ * Validate the checked-in trust manifest before a configured preview can boot.
+ *
+ * The manifest is an executable trust input, not documentation: its bytes,
+ * complete filesystem ancestry and parsed exact contents are all checked. The
+ * caller must provide the fixed repository path; this function intentionally
+ * has no environment/provider override for the trust anchor.
+ */
+export function validateTesseractCheckedInManifestSync(manifestPath: string): void {
+  if (!isAbsolute(manifestPath) || resolve(manifestPath) !== manifestPath || dirname(manifestPath) === manifestPath) {
+    throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR manifest is unavailable.");
+  }
+  const opened: number[] = [];
+  try {
+    for (const path of directoryAncestry(dirname(manifestPath))) {
+      opened.push(openTrustedPathSync(path, true));
+    }
+    const manifestFd = openTrustedPathSync(manifestPath, false, TESSERACT_MODEL_MANIFEST_SHA256);
+    opened.push(manifestFd);
+    const stat = fstatSync(manifestFd);
+    const bytes = readFdSync(manifestFd, stat, 1024 * 1024);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR manifest is invalid.");
+    }
+    if (!exactTesseractManifest(parsed)) {
+      throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR manifest is invalid.");
+    }
+    // Recheck the open handles and pathname/hash after parsing, closing the
+    // startup TOCTOU window between the initial open and trust decision.
+    assertAssetStateSync(opened, [[manifestPath, TESSERACT_MODEL_MANIFEST_SHA256]]);
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR manifest is unavailable.");
+  } finally {
+    for (const fd of opened) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
+function exactTesseractManifest(value: unknown): value is TesseractModelManifest {
+  if (!plainDataObject(value) || !exactKeys(value, TESSERACT_MANIFEST_KEYS)) return false;
+  for (const key of TESSERACT_MANIFEST_KEYS) {
+    if (typeof value[key] !== "string" || value[key] !== FROZEN_TESSERACT_MANIFEST[key]) return false;
+  }
+  return true;
+}
+
+function readFdSync(fd: number, stat: Stats, maxBytes: number): Uint8Array {
+  if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > maxBytes) throw new Error();
+  const buffer = Buffer.allocUnsafe(stat.size);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) throw new Error();
+    offset += bytesRead;
+  }
+  return new Uint8Array(buffer);
 }
 
 function openTrustedPathSync(path: string, directory: boolean, expectedSha256?: string): number {

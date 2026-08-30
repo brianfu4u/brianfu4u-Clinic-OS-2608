@@ -27,6 +27,7 @@ import {
   TESSERACT_OCR_MODEL_ID,
   TesseractOcrProvider,
   validateTesseractAssetPathChainSync,
+  validateTesseractCheckedInManifestSync,
 } from "../runtime/tesseract-ocr-provider.ts";
 import { LocalObjectStore } from "../storage/local-object-store.ts";
 import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
@@ -39,6 +40,7 @@ const PUBLIC_FILES = new Map([
   ["/app.js", { file: "public/app.js", type: "text/javascript; charset=utf-8" }],
 ]);
 const INDEX_FILE = fileURLToPath(new URL("./public/index.html", import.meta.url));
+const TESSERACT_MANIFEST_FILE = fileURLToPath(new URL("../../models/tesseract-eng-v1.manifest.json", import.meta.url));
 const EXTRACTION_PATH = "/api/employee/extraction/exam-report";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
 const DEFAULT_BODY_TIMEOUT_MS = 5_000;
@@ -111,6 +113,7 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   );
   const executablePath = requiredAbsolutePath(env.WO021_TESSERACT_PATH, "TESSERACT_PATH_REQUIRED");
   const tessdataDir = requiredAbsolutePath(env.WO021_TESSDATA_DIR, "TESSDATA_DIR_REQUIRED");
+  validateTesseractCheckedInManifestSync(TESSERACT_MANIFEST_FILE);
   validateTesseractAssetPathChainSync({ executablePath, tessdataDir });
   const pool = createNodePgPool(env.DATABASE_URL);
   const runtime: RuntimeManifest = {
