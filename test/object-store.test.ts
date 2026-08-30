@@ -94,7 +94,7 @@ test("exact replay is idempotent and conflicting replay never overwrites", async
   t.after(() => rm(root, { recursive: true, force: true }));
   const command = { objectId: "same", mediaType: "application/pdf", bytes: BYTES };
   assert.deepEqual(await gateway.put(CONTEXT, command), await gateway.put(CONTEXT, command));
-  await assert.rejects(gateway.put(CONTEXT, { ...command, bytes: new Uint8Array([9]) }), hasCode("OBJECT_STORE_PROVIDER_FAILED"));
+  await assert.rejects(gateway.put(CONTEXT, { ...command, bytes: new Uint8Array([9]) }), hasCode("OBJECT_ID_CONFLICT"));
   assert.deepEqual((await gateway.get(CONTEXT, { objectId: "same" })).bytes, BYTES);
 });
 
@@ -171,7 +171,7 @@ test("on-disk truncation is detected on get", async (t) => {
   await gateway.put(CONTEXT, { objectId: "damaged", mediaType: "image/png", bytes: BYTES });
   const file = join(root, digest(`clinic:${CONTEXT.clinicId}`), digest("object:damaged"));
   await truncate(file, 5);
-  await assert.rejects(gateway.get(CONTEXT, { objectId: "damaged" }), hasCode("OBJECT_STORE_PROVIDER_FAILED"));
+  await assert.rejects(gateway.get(CONTEXT, { objectId: "damaged" }), hasCode("OBJECT_INTEGRITY_FAILED"));
 });
 
 test("manifest mismatch, Strict cloud provider and identity mutation fail closed", async () => {
@@ -208,6 +208,24 @@ test("provider identity mutation during await fails before receipt", async () =>
   provider.kind = "CLOUD_OBJECT_STORE";
   release();
   await assert.rejects(pending, hasCode("OBJECT_STORE_PROVIDER_IDENTITY_CHANGED"));
+  assert.deepEqual(gateway.listReceipts(CONTEXT), []);
+});
+
+test("throwing provider kind getter is sanitized after await", async () => {
+  const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => { release = resolve; });
+  const original = provider.put.bind(provider);
+  provider.put = async (context, request) => { await waiting; return original(context, request); };
+  const gateway = new ObjectStoreGateway(strict(), provider);
+  const pending = gateway.put(CONTEXT, { objectId: "kind-getter", mediaType: "image/png", bytes: BYTES });
+  Object.defineProperty(provider, "kind", { get() { throw new Error("patient /private/path"); } });
+  release();
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof DomainError && error.code === "OBJECT_STORE_PROVIDER_FAILED" &&
+      error.message === "Object store provider operation failed.",
+  );
   assert.deepEqual(gateway.listReceipts(CONTEXT), []);
 });
 
@@ -248,6 +266,44 @@ test("malformed, empty and oversize provider get responses fail without receipt"
   }
 });
 
+test("throwing response getters and proxies fail with fixed response errors", async () => {
+  const malicious = [
+    () => ({
+      get clinicId() { throw new Error("patient /private/ref"); },
+      objectId: "proxy", contentSha256: "0".repeat(64), sizeBytes: 1, mediaType: "image/png",
+    }),
+    () => new Proxy({} as StoredObjectRef, { ownKeys() { throw new Error("patient /private/proxy"); } }),
+  ];
+  for (const response of malicious) {
+    const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+    provider.put = async () => response() as StoredObjectRef;
+    const gateway = new ObjectStoreGateway(strict(), provider);
+    await assert.rejects(
+      gateway.put(CONTEXT, { objectId: "proxy", mediaType: "image/png", bytes: BYTES }),
+      (error: unknown) => error instanceof DomainError && error.code === "INVALID_OBJECT_STORE_RESPONSE" &&
+        error.message === "Provider object response is invalid.",
+    );
+    assert.deepEqual(gateway.listReceipts(CONTEXT), []);
+  }
+
+  for (const field of ["ref", "bytes"] as const) {
+    const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+    const gateway = new ObjectStoreGateway(strict(), provider);
+    await gateway.put(CONTEXT, { objectId: `get-${field}`, mediaType: "image/png", bytes: BYTES });
+    const receiptCount = gateway.listReceipts(CONTEXT).length;
+    provider.get = async () => Object.defineProperty({}, field, {
+      enumerable: true,
+      get() { throw new Error("patient /private/getter"); },
+    }) as ProviderGetResponse;
+    await assert.rejects(
+      gateway.get(CONTEXT, { objectId: `get-${field}` }),
+      (error: unknown) => error instanceof DomainError && error.code === "INVALID_OBJECT_STORE_RESPONSE" &&
+        !error.message.includes("patient") && !error.message.includes("private"),
+    );
+    assert.equal(gateway.listReceipts(CONTEXT).length, receiptCount);
+  }
+});
+
 test("provider exceptions are sanitized and never create receipts", async () => {
   const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
   provider.put = async () => { throw new Error("patient-name /private/clinic/root"); };
@@ -266,8 +322,8 @@ test("provider exceptions are sanitized and never create receipts", async () => 
   const receiptCount = getGateway.listReceipts(CONTEXT).length;
   await assert.rejects(
     getGateway.get(CONTEXT, { objectId: "get-safe" }),
-    (error: unknown) => error instanceof DomainError && error.code === "OBJECT_STORE_PROVIDER_FAILED" &&
-      error.message === "Object store provider operation failed.",
+    (error: unknown) => error instanceof DomainError && error.code === "OBJECT_NOT_FOUND" &&
+      error.message === "Object was not found.",
   );
   assert.equal(getGateway.listReceipts(CONTEXT).length, receiptCount);
 });
@@ -291,7 +347,7 @@ test("same ID and bytes with a different media type conflicts for local and fixt
     await gateway.put(CONTEXT, { objectId: "typed", mediaType: "image/png", bytes: BYTES });
     await assert.rejects(
       gateway.put(CONTEXT, { objectId: "typed", mediaType: "audio/wav", bytes: BYTES }),
-      hasCode("OBJECT_STORE_PROVIDER_FAILED"),
+      hasCode("OBJECT_ID_CONFLICT"),
     );
     assert.equal((await gateway.get(CONTEXT, { objectId: "typed" })).ref.mediaType, "image/png");
   }
@@ -306,7 +362,8 @@ test("receipts and errors contain no bytes or filesystem paths", async (t) => {
   assert.equal(serialized.includes(root), false);
   await assert.rejects(gateway.get(CONTEXT, { objectId: "missing" }), (error: unknown) => {
     const message = String((error as Error).message);
-    return !message.includes(root) && !message.includes("missing");
+    return error instanceof DomainError && error.code === "OBJECT_NOT_FOUND" &&
+      message === "Object was not found." && !message.includes(root);
   });
 });
 

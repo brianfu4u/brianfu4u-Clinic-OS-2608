@@ -26,18 +26,22 @@ export class ObjectStoreGateway {
 
   constructor(manifest: RuntimeManifest, provider: ObjectStoreProvider) {
     this.#manifest = validateRuntimeManifest(manifest);
-    if (!provider || typeof provider.kind !== "string" ||
-      typeof provider.put !== "function" || typeof provider.get !== "function") {
+    let providerKind: ObjectStoreProvider["kind"];
+    try {
+      providerKind = provider?.kind;
+      if (typeof providerKind !== "string" ||
+        typeof provider.put !== "function" || typeof provider.get !== "function") throw new Error();
+    } catch {
       throw new DomainError("INVALID_OBJECT_STORE_PROVIDER", "Object store provider contract is invalid.");
     }
-    if (this.#manifest.profile !== "CLOUD" && provider.kind === "CLOUD_OBJECT_STORE") {
+    if (this.#manifest.profile !== "CLOUD" && providerKind === "CLOUD_OBJECT_STORE") {
       throw new DomainError("REMOTE_OBJECT_STORE_FORBIDDEN", "On-Prem profiles require local object storage.");
     }
-    if (provider.kind !== this.#manifest.fileProvider) {
+    if (providerKind !== this.#manifest.fileProvider) {
       throw new DomainError("OBJECT_STORE_PROVIDER_KIND_MISMATCH", "Provider kind must match RuntimeManifest.");
     }
     this.#provider = provider;
-    this.#expectedKind = provider.kind;
+    this.#expectedKind = providerKind;
   }
 
   async put(context: ActorContext, command: PutObjectCommand): Promise<StoredObjectRef> {
@@ -63,11 +67,11 @@ export class ObjectStoreGateway {
     let response: StoredObjectRef;
     try {
       response = await this.#provider.put(structuredClone(context), { ...expected, bytes });
-    } catch {
-      throw new DomainError("OBJECT_STORE_PROVIDER_FAILED", "Object store provider operation failed.");
+    } catch (error) {
+      throw sanitizeProviderError(error);
     }
     this.#assertProviderIdentity();
-    const ref = validateRef(response, expected);
+    const ref = safeValidateRef(response, expected);
     this.#receipts.push(Object.freeze({ ...ref, operation: "PUT" }));
     return structuredClone(ref);
   }
@@ -82,23 +86,20 @@ export class ObjectStoreGateway {
     let response: ProviderGetResponse;
     try {
       response = await this.#provider.get(structuredClone(context), { clinicId, objectId });
-    } catch {
-      throw new DomainError("OBJECT_STORE_PROVIDER_FAILED", "Object store provider operation failed.");
+    } catch (error) {
+      throw sanitizeProviderError(error);
     }
     this.#assertProviderIdentity();
-    if (!response || !(response.bytes instanceof Uint8Array) || response.bytes.byteLength === 0 ||
-      response.bytes.byteLength > MAX_OBJECT_SIZE_BYTES) {
-      throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Provider get response is invalid.");
-    }
-    const bytes = new Uint8Array(response.bytes);
+    const snapshot = safeCloneGetResponse(response);
+    const bytes = new Uint8Array(snapshot.bytes);
     const expected = {
       clinicId,
       objectId,
       contentSha256: sha256(bytes),
       sizeBytes: bytes.byteLength,
-      mediaType: response.ref?.mediaType,
+      mediaType: snapshot.ref.mediaType,
     };
-    const ref = validateRef(response.ref, expected);
+    const ref = safeValidateRef(snapshot.ref, expected);
     this.#receipts.push(Object.freeze({ ...ref, operation: "GET" }));
     return structuredClone({ ref, bytes });
   }
@@ -109,7 +110,13 @@ export class ObjectStoreGateway {
   }
 
   #assertProviderIdentity(): void {
-    if (this.#provider.kind !== this.#expectedKind || this.#provider.kind !== this.#manifest.fileProvider) {
+    let currentKind: ObjectStoreProvider["kind"];
+    try {
+      currentKind = this.#provider.kind;
+    } catch {
+      throw new DomainError("OBJECT_STORE_PROVIDER_FAILED", "Object store provider operation failed.");
+    }
+    if (currentKind !== this.#expectedKind || currentKind !== this.#manifest.fileProvider) {
       throw new DomainError("OBJECT_STORE_PROVIDER_IDENTITY_CHANGED", "Object store provider identity changed.");
     }
   }
@@ -148,6 +155,37 @@ function validateRef(value: unknown, expected: StoredObjectRef): StoredObjectRef
     throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Provider object reference does not match content.");
   }
   return Object.freeze({ ...ref });
+}
+
+function safeValidateRef(value: unknown, expected: StoredObjectRef): StoredObjectRef {
+  try {
+    return validateRef(structuredClone(value), expected);
+  } catch {
+    throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Provider object response is invalid.");
+  }
+}
+
+function safeCloneGetResponse(value: unknown): ProviderGetResponse {
+  try {
+    const response = structuredClone(value) as ProviderGetResponse;
+    if (!response || !(response.bytes instanceof Uint8Array) || response.bytes.byteLength === 0 ||
+      response.bytes.byteLength > MAX_OBJECT_SIZE_BYTES || !response.ref) throw new Error();
+    return response;
+  } catch {
+    throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Provider get response is invalid.");
+  }
+}
+
+function sanitizeProviderError(error: unknown): DomainError {
+  const safe: Record<string, string> = {
+    OBJECT_ID_CONFLICT: "Object ID already contains different content.",
+    OBJECT_NOT_FOUND: "Object was not found.",
+    OBJECT_INTEGRITY_FAILED: "Stored object failed integrity verification.",
+  };
+  if (error instanceof DomainError && safe[error.code]) {
+    return new DomainError(error.code, safe[error.code]);
+  }
+  return new DomainError("OBJECT_STORE_PROVIDER_FAILED", "Object store provider operation failed.");
 }
 
 function sha256(bytes: Uint8Array): string {

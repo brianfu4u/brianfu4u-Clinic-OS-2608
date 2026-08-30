@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, lstat, link, mkdir, open, realpath, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, open, realpath, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -67,12 +67,7 @@ export class LocalObjectStore implements ObjectStoreProvider {
   async #initialize(): Promise<string> {
     try {
       await mkdir(this.#root, { recursive: true, mode: 0o700 });
-      let stat = await lstat(this.#root);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe root");
-      await chmod(this.#root, 0o700);
-      stat = await lstat(this.#root);
-      if ((stat.mode & 0o777) !== 0o700) throw new Error("unsafe root permissions");
-      return realpath(this.#root);
+      return hardenDirectory(this.#root);
     } catch (error) {
       throw safeStorageError(error);
     }
@@ -87,13 +82,8 @@ export class LocalObjectStore implements ObjectStoreProvider {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw safeStorageError(error);
     }
     try {
-      let stat = await lstat(clinicDirectory);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe tenant directory");
-      await chmod(clinicDirectory, 0o700);
-      stat = await lstat(clinicDirectory);
-      if ((stat.mode & 0o777) !== 0o700) throw new Error("unsafe tenant permissions");
       const currentRoot = await realpath(this.#root);
-      const currentClinic = await realpath(clinicDirectory);
+      const currentClinic = await hardenDirectory(clinicDirectory);
       const rel = relative(currentRoot, currentClinic);
       if (currentRoot !== root || rel === "" || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         throw new Error("unsafe storage path");
@@ -174,4 +164,16 @@ function digest(value: string | Uint8Array): string {
 function safeStorageError(error: unknown): DomainError {
   if (error instanceof DomainError) return error;
   return new DomainError("OBJECT_STORE_IO_FAILED", "Local object storage operation failed.");
+}
+
+async function hardenDirectory(path: string): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    await handle.chmod(0o700);
+    const stat = await handle.stat();
+    if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700) throw new Error("unsafe directory");
+    return await realpath(path);
+  } finally {
+    await handle.close();
+  }
 }
