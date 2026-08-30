@@ -25,6 +25,10 @@ import {
 import type { DatabasePool, TenantQueryClient } from "./database-contracts.ts";
 import { parseStrictIsoInstant } from "./strict-timestamp.ts";
 import { withTenantTransaction } from "./tenant-transaction.ts";
+import type {
+  ExtractionRequestIdentity,
+  PersistedExtractionRecord,
+} from "./extraction-request-identity.ts";
 
 type AttemptRow = {
   request_id: string;
@@ -43,6 +47,8 @@ type AttemptRow = {
   policy_version: string;
   parser_version: string;
   completed_at: Date | string;
+  consequence_expectation_id: string;
+  requested_fact_card_id: string;
 };
 
 type ObjectRow = {
@@ -57,6 +63,7 @@ const ATTEMPT_COLUMNS = `
   request_id, object_id, object_content_sha256, artifact_id, fact_card_id, status,
   candidate, reason_codes, provider_kind, model_id, model_manifest_sha256, capability,
   schema_version, policy_version, parser_version, completed_at
+  , consequence_expectation_id, requested_fact_card_id
 `;
 const RESULT_KEYS = ["artifact", "candidate", "factCard", "lineage", "reasonCodes", "status"];
 const LINEAGE_KEYS = [
@@ -92,11 +99,13 @@ export class ExtractionPersistenceRepository {
     context: ActorContext,
     objectRef: StoredObjectRef,
     result: StoredEvidenceExtractionResult,
-  ): Promise<StoredEvidenceExtractionResult> {
-    let captured: { context: ActorContext; objectRef: StoredObjectRef; result: StoredEvidenceExtractionResult };
+    identity: ExtractionRequestIdentity,
+  ): Promise<PersistedExtractionRecord> {
+    let captured: { context: ActorContext; objectRef: StoredObjectRef; result: StoredEvidenceExtractionResult; identity: ExtractionRequestIdentity };
     try {
-      captured = snapshotInertExtractionInput({ context, objectRef, result });
+      captured = snapshotInertExtractionInput({ context, objectRef, result, identity });
       validateExtraction(captured.context, captured.objectRef, captured.result, this.#spec);
+      validateRequestIdentity(captured.identity, captured.result);
     } catch (error) {
       if (error instanceof DomainError) throw error;
       throw new DomainError("INVALID_EXTRACTION_PERSISTENCE_INPUT", "Extraction persistence input is invalid.");
@@ -125,9 +134,9 @@ export class ExtractionPersistenceRepository {
           }
         }
 
-        await insertAttempt(client, captured.context.clinicId, captured.result);
+        await insertAttempt(client, captured.context.clinicId, captured.result, captured.identity);
         const attempt = await findAttempt(client, captured.context.clinicId, captured.result.lineage.requestId);
-        if (!attempt || !attemptEqual(attempt, captured.result, captured.objectRef)) {
+        if (!attempt || !attemptEqual(attempt, captured.result, captured.objectRef, captured.identity)) {
           throw new DomainError("EXTRACTION_REQUEST_CONFLICT", "Extraction request ID is already used by different content.");
         }
         return resultFromRows(artifact, factCard, attempt);
@@ -142,7 +151,7 @@ export class ExtractionPersistenceRepository {
   async getExtraction(
     context: ActorContext,
     requestId: string,
-  ): Promise<StoredEvidenceExtractionResult | null> {
+  ): Promise<PersistedExtractionRecord | null> {
     let captured: { context: ActorContext; requestId: string };
     try {
       captured = snapshotInertExtractionInput({ context, requestId });
@@ -180,9 +189,10 @@ export class ExtractionPersistenceRepository {
         } else if (attempt.fact_card_id !== null) {
           throw new DomainError("EXTRACTION_LINEAGE_CORRUPT", "Stored review extraction has a FactCard.");
         }
-        const result = resultFromRows(artifact, factCard, attempt);
-        validateExtraction(captured.context, objectRef, result, this.#spec);
-        return structuredClone(result);
+        const record = resultFromRows(artifact, factCard, attempt);
+        validateExtraction(captured.context, objectRef, record.extraction, this.#spec);
+        validateRequestIdentity(record.identity, record.extraction);
+        return structuredClone(record);
       });
     } catch (error) {
       if (error instanceof DomainError) throw error;
@@ -321,10 +331,11 @@ async function insertAttempt(
   client: TenantQueryClient,
   clinicId: string,
   result: StoredEvidenceExtractionResult,
+  identity: ExtractionRequestIdentity,
 ) {
   await client.query(
     `INSERT INTO evidence_extraction_attempt (${ATTEMPT_COLUMNS},clinic_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
      ON CONFLICT (clinic_id,request_id) DO NOTHING`,
     [
       result.lineage.requestId, (result.artifact.payload as { storedObjectRef: StoredObjectRef }).storedObjectRef.objectId,
@@ -332,7 +343,8 @@ async function insertAttempt(
       result.status === "READY" ? result.factCard.id : null, result.status, result.candidate,
       result.reasonCodes, result.lineage.providerKind, result.lineage.modelId,
       result.lineage.modelManifestSha256, result.lineage.capability, result.lineage.schemaVersion,
-      result.lineage.policyVersion, result.lineage.parserVersion, result.lineage.completedAt, clinicId,
+      result.lineage.policyVersion, result.lineage.parserVersion, result.lineage.completedAt,
+      identity.consequenceExpectationId, identity.requestedFactCardId, clinicId,
     ],
   );
 }
@@ -345,7 +357,7 @@ async function findAttempt(client: TenantQueryClient, clinicId: string, requestI
   return result.rows[0] ?? null;
 }
 
-function attemptEqual(row: AttemptRow, result: StoredEvidenceExtractionResult, ref: StoredObjectRef): boolean {
+function attemptEqual(row: AttemptRow, result: StoredEvidenceExtractionResult, ref: StoredObjectRef, identity: ExtractionRequestIdentity): boolean {
   return semanticEqual(attemptProjection(row), {
     requestId: result.lineage.requestId,
     objectId: ref.objectId,
@@ -363,6 +375,8 @@ function attemptEqual(row: AttemptRow, result: StoredEvidenceExtractionResult, r
     policyVersion: result.lineage.policyVersion,
     parserVersion: result.lineage.parserVersion,
     completedAt: instant(result.lineage.completedAt),
+    consequenceExpectationId: identity.consequenceExpectationId,
+    requestedFactCardId: identity.requestedFactCardId,
   });
 }
 
@@ -375,6 +389,8 @@ function attemptProjection(row: AttemptRow) {
     modelManifestSha256: row.model_manifest_sha256, capability: row.capability,
     schemaVersion: row.schema_version, policyVersion: row.policy_version,
     parserVersion: row.parser_version, completedAt: instant(timestamp(row.completed_at)),
+    consequenceExpectationId: row.consequence_expectation_id,
+    requestedFactCardId: row.requested_fact_card_id,
   };
 }
 
@@ -382,7 +398,7 @@ function resultFromRows(
   artifact: Artifact,
   factCard: EvidenceFactCard | null,
   attempt: AttemptRow,
-): StoredEvidenceExtractionResult {
+): PersistedExtractionRecord {
   const candidate = structuredClone(attempt.candidate) as ExtractionCandidate;
   const lineage: ExtractionLineage = {
     requestId: attempt.request_id, providerKind: attempt.provider_kind, modelId: attempt.model_id,
@@ -392,12 +408,33 @@ function resultFromRows(
     objectContentSha256: attempt.object_content_sha256,
   };
   if (attempt.status === "READY" && factCard) {
-    return structuredClone({ status: "READY", artifact, factCard, candidate, reasonCodes: [], lineage });
+    return structuredClone({
+      extraction: { status: "READY", artifact, factCard, candidate, reasonCodes: [], lineage },
+      identity: {
+        consequenceExpectationId: attempt.consequence_expectation_id,
+        requestedFactCardId: attempt.requested_fact_card_id,
+      },
+    });
   }
   return structuredClone({
-    status: "REVIEW_REQUIRED", artifact, factCard: null, candidate,
-    reasonCodes: [...attempt.reason_codes] as Array<(typeof REVIEW_REASONS)[number]>, lineage,
+    extraction: {
+      status: "REVIEW_REQUIRED", artifact, factCard: null, candidate,
+      reasonCodes: [...attempt.reason_codes] as Array<(typeof REVIEW_REASONS)[number]>, lineage,
+    },
+    identity: {
+      consequenceExpectationId: attempt.consequence_expectation_id,
+      requestedFactCardId: attempt.requested_fact_card_id,
+    },
   });
+}
+
+function validateRequestIdentity(identity: ExtractionRequestIdentity, result: StoredEvidenceExtractionResult): void {
+  if (!plainObject(identity) || Object.keys(identity).length !== 2 ||
+      !nonblank(identity.consequenceExpectationId) || identity.consequenceExpectationId.length > 256 ||
+      !nonblank(identity.requestedFactCardId) || identity.requestedFactCardId.length > 256 ||
+      (result.status === "READY" && identity.requestedFactCardId !== result.factCard.id)) {
+    throw new DomainError("INVALID_EXTRACTION_REQUEST_IDENTITY", "Extraction request identity is invalid.");
+  }
 }
 
 function exactObject(value: unknown, keys: readonly string[], code: string): asserts value is Record<string, unknown> {

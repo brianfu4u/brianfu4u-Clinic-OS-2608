@@ -90,7 +90,10 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     await assert.rejects(tenantInsertForeignClinic(sourceApp));
     const extractions = new ExtractionPersistenceRepository(sourceProductPool);
     const extractionA = extraction("WO018-A");
-    await extractions.saveExtraction(employee, extractionA.objectRef, extractionA.result);
+    await extractions.saveExtraction(employee, extractionA.objectRef, extractionA.result, {
+      consequenceExpectationId: "WO018-extraction-expectation",
+      requestedFactCardId: extractionA.result.factCard.id,
+    });
     throwIfAborted(cancellationController.signal);
 
     progress("CONCURRENCY");
@@ -173,7 +176,10 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     const managerB = actor("WO018-B", "MANAGER");
     const completeB = await createCompletedChain(golden, employeeB, "WO018-B-close");
     const extractionB = extraction("WO018-B");
-    await extractions.saveExtraction(employeeB, extractionB.objectRef, extractionB.result);
+    await extractions.saveExtraction(employeeB, extractionB.objectRef, extractionB.result, {
+      consequenceExpectationId: "WO018-B-extraction-expectation",
+      requestedFactCardId: extractionB.result.factCard.id,
+    });
     await decisions.recordManagerDecision(managerB, {
       id: "WO018-B-decision", expectationId: completeB.expectationId, action: "CLOSE_STANDARD",
       reasonCode: null, note: null, decidedAt: "2026-08-30T10:10:00.000Z",

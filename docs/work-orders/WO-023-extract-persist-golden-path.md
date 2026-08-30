@@ -1,6 +1,6 @@
 # WO-023 — Extract, Persist, and Process the Golden Path
 
-**Status:** ARCHITECTURE FROZEN / BUILDER READY  
+**Status:** ARCHITECTURE FROZEN / BUILDER READY / REVIEW FIX IN PROGRESS
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -41,7 +41,11 @@ one narrow command. It must call only these existing authorities:
 
 1. `StoredEvidenceExtractionService.extract` for object read, inference and candidate validation;
 2. `ExtractionPersistenceRepository` for the atomic StoredObjectRef/Artifact/FactCard/Attempt
-   write and a tenant-scoped detached lookup by extraction `requestId`;
+   write and a tenant-scoped detached lookup by extraction `requestId`. Migration `0007` binds
+   every durable attempt to both the requested consequence Expectation and the requested FactCard;
+   these two opaque IDs are request identity, not model claims. This is required because a
+   `requestId` replay with a changed `expectationId` or FactCard ID must never reuse extraction and
+   invoke the golden path against a different operation, including `REVIEW_REQUIRED` results.
 3. `PersistedGoldenPath.recordConsequence`, which in turn uses the existing Capture Repository,
    authoritative Workflow Attach Repository, Expectation Repository and Verification Repository.
 
@@ -120,8 +124,9 @@ lineage projection and must contain no object bytes, filesystem path or model ou
 validated bounded candidate already defined by WO-020.
 
 - If a record exists, compare its immutable extraction identity with the current command:
-  clinic, request, object ref/hash, Artifact ID/kind/identity/occurrence/source actor, and the
-  server-frozen lineage. A changed value is a stable `EXTRACTION_REQUEST_CONFLICT`.
+  clinic, request, object ref/hash, Artifact ID/kind/identity/occurrence/source actor, requested
+  FactCard ID, consequence Expectation ID and the server-frozen lineage. A changed value is a
+  stable `EXTRACTION_REQUEST_CONFLICT`.
 - If it matches, reuse the stored detached result and do not read the object or call inference.
 - If no record exists, call `StoredEvidenceExtractionService.extract`, then persist the exact
   result with `saveExtraction`.
@@ -205,7 +210,7 @@ test/postgres-extraction-persistence-repository.test.ts # read/replay coverage i
 README.md                                       # one usage/authority note only
 ```
 
-No migration, dependency, ORM, HTTP route, UI, queue, worker, scheduler, object-store provider,
+No migration beyond the required append-only `0007` operation-identity columns, dependency, ORM, HTTP route, UI, queue, worker, scheduler, object-store provider,
 OCR/model change, manager action, or new domain state is allowed.
 
 ## 8. Acceptance matrix

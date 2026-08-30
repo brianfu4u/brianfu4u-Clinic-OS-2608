@@ -11,6 +11,7 @@ import {
 } from "./evidence-extraction.ts";
 import type { PersistedConsequenceResult, PersistedGoldenPath } from "./persisted-golden-path.ts";
 import type { ExtractionPersistenceRepository } from "../persistence/extraction-persistence-repository.ts";
+import type { PersistedExtractionRecord } from "../persistence/extraction-request-identity.ts";
 import type { StoredObjectRef } from "../storage/contracts.ts";
 
 export interface ProcessGoldenPathCommand {
@@ -85,7 +86,7 @@ export class ExtractionGoldenPath {
       captured.command.extraction.requestId,
     );
     if (saved) {
-      assertReplayIdentity(captured.context, captured.command.extraction, saved);
+      assertReplayIdentity(captured.context, captured.command.extraction, captured.command.operation, saved);
     } else {
       let extracted: StoredEvidenceExtractionResult;
       try {
@@ -99,6 +100,10 @@ export class ExtractionGoldenPath {
           captured.context,
           captured.command.extraction.objectRef,
           extracted,
+          {
+            consequenceExpectationId: captured.command.operation.expectationId,
+            requestedFactCardId: captured.command.extraction.factCardId,
+          },
         );
       } catch (error) {
         // A concurrent first caller may have won the immutable request identity.
@@ -109,17 +114,18 @@ export class ExtractionGoldenPath {
           captured.command.extraction.requestId,
         );
         if (!saved) throw error;
-        assertReplayIdentity(captured.context, captured.command.extraction, saved);
+        assertReplayIdentity(captured.context, captured.command.extraction, captured.command.operation, saved);
       }
     }
 
     saved = snapshotInertExtractionInput(saved);
-    assertReplayIdentity(captured.context, captured.command.extraction, saved);
-    if (saved.status === "REVIEW_REQUIRED") {
+    assertReplayIdentity(captured.context, captured.command.extraction, captured.command.operation, saved);
+    const extraction = saved.extraction;
+    if (extraction.status === "REVIEW_REQUIRED") {
       return structuredClone({
         status: "REVIEW_REQUIRED" as const,
         reviewStage: "EXTRACTION" as const,
-        extraction: saved,
+        extraction,
         goldenPath: null,
       });
     }
@@ -127,8 +133,8 @@ export class ExtractionGoldenPath {
     let goldenPath: PersistedConsequenceResult;
     try {
       goldenPath = await this.#goldenPath.recordConsequence(captured.context, {
-        artifact: saved.artifact,
-        factCard: saved.factCard,
+        artifact: extraction.artifact,
+        factCard: extraction.factCard,
         expectationId: captured.command.operation.expectationId,
         attachedAt: captured.command.operation.attachedAt,
         evaluatedAt: captured.command.operation.evaluatedAt,
@@ -141,14 +147,14 @@ export class ExtractionGoldenPath {
       return structuredClone({
         status: "REVIEW_REQUIRED" as const,
         reviewStage: "COMPOSITION" as const,
-        extraction: saved,
+        extraction,
         goldenPath,
       });
     }
     return structuredClone({
       status: "COMPLETED" as const,
       reviewStage: null,
-      extraction: saved,
+      extraction,
       goldenPath,
     });
   }
@@ -192,14 +198,16 @@ function validateCommand(context: ActorContext, command: ProcessGoldenPathComman
 function assertReplayIdentity(
   context: ActorContext,
   command: StoredEvidenceExtractionCommand,
-  stored: StoredEvidenceExtractionResult,
+  operation: ProcessGoldenPathCommand["operation"],
+  stored: PersistedExtractionRecord,
 ): void {
-  const payload = stored.artifact.payload;
+  const extraction = stored.extraction;
+  const payload = extraction.artifact.payload;
   const storedRef = payload && typeof payload === "object" && !Array.isArray(payload) &&
     Object.hasOwn(payload, "storedObjectRef") ? (payload as { storedObjectRef: unknown }).storedObjectRef : null;
-  const artifact = stored.artifact;
-  const lineage = stored.lineage;
-  if (stored.artifact.clinicId !== context.clinicId || storedRef === null ||
+  const artifact = extraction.artifact;
+  const lineage = extraction.lineage;
+  if (extraction.artifact.clinicId !== context.clinicId || storedRef === null ||
       !sameRef(storedRef, command.objectRef) ||
       artifact.id !== command.artifactId || artifact.clinicId !== context.clinicId ||
       artifact.kind !== command.kind || !sameInstant(artifact.occurredAt, command.occurredAt) ||
@@ -214,7 +222,9 @@ function assertReplayIdentity(
       lineage.schemaVersion !== EYE_EXAM_EXTRACTION_SPEC.schemaVersion ||
       lineage.policyVersion !== EYE_EXAM_EXTRACTION_SPEC.policyVersion ||
       lineage.parserVersion !== EYE_EXAM_EXTRACTION_SPEC.parserVersion ||
-      (stored.status === "READY" && stored.factCard.id !== command.factCardId)) {
+      stored.identity.consequenceExpectationId !== operation.expectationId ||
+      stored.identity.requestedFactCardId !== command.factCardId ||
+      (extraction.status === "READY" && extraction.factCard.id !== command.factCardId)) {
     throw new DomainError("EXTRACTION_REQUEST_CONFLICT", "Extraction request identity conflicts with durable lineage.");
   }
 }

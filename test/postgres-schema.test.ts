@@ -29,6 +29,9 @@ const migrationSql = await readFile(
 ) + await readFile(
   new URL("../src/persistence/migrations/0006_extraction_lineage.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0007_extraction_operation_identity.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -132,11 +135,12 @@ test("identical migration rerun is a no-op", async () => {
         "0004_s2_verification",
         "0005_manager_decision_saga",
         "0006_extraction_lineage",
+        "0007_extraction_operation_identity",
       ],
     );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 6);
+    assert.equal(ledger.rows.length, 7);
   } finally {
     await db.close();
   }

@@ -4,6 +4,7 @@ import { ExtractionGoldenPath } from "../src/application/extraction-golden-path.
 import { EYE_EXAM_EXTRACTION_SPEC } from "../src/application/evidence-extraction.ts";
 import type { ActorContext } from "../src/domain/contracts.ts";
 import { DomainError } from "../src/domain/errors.ts";
+import type { PersistedExtractionRecord } from "../src/persistence/extraction-request-identity.ts";
 
 const context: ActorContext = { clinicId: "clinic-a", actorId: "employee-a", role: "EMPLOYEE" };
 const objectRef = {
@@ -66,6 +67,10 @@ function completed() {
   return { status: "COMPLETED", capture: {}, attachment: {}, expectation: {}, verification: {} };
 }
 
+function persisted(extraction: any, expectationId = "expectation-a"): PersistedExtractionRecord {
+  return { extraction, identity: { consequenceExpectationId: expectationId, requestedFactCardId: "fact-a" } };
+}
+
 test("valid READY extraction persists before consequence and returns completed", async () => {
   const calls: string[] = [];
   const extraction = ready();
@@ -73,7 +78,7 @@ test("valid READY extraction persists before consequence and returns completed",
     extractor: { async extract() { calls.push("extract"); return extraction; } },
     persistence: {
       async getExtraction() { calls.push("get"); return null; },
-      async saveExtraction(_context, _ref, value) { calls.push("save"); return value; },
+      async saveExtraction(_context, _ref, value) { calls.push("save"); return persisted(value); },
     },
     goldenPath: { async recordConsequence(_context, value) { calls.push(`golden:${value.expectationId}`); return completed(); } },
   });
@@ -89,7 +94,7 @@ test("REVIEW_REQUIRED persists and stops before acquiring the golden path", asyn
     extractor: { async extract() { return extraction; } },
     persistence: {
       async getExtraction() { return null; },
-      async saveExtraction(_context, _ref, value) { return value; },
+      async saveExtraction(_context, _ref, value) { return persisted(value); },
     },
     goldenPath: { async recordConsequence() { goldenCalls += 1; return completed(); } },
   });
@@ -107,8 +112,8 @@ test("durable replay skips object/model extraction and uses detached stored resu
   const app = new ExtractionGoldenPath({
     extractor: { async extract() { extractCalls += 1; return stored; } },
     persistence: {
-      async getExtraction() { return structuredClone(stored); },
-      async saveExtraction() { saveCalls += 1; return stored; },
+      async getExtraction() { return structuredClone(persisted(stored)); },
+      async saveExtraction() { saveCalls += 1; return persisted(stored); },
     },
     goldenPath: { async recordConsequence(_context, value) { return completed(); } },
   });
@@ -119,6 +124,40 @@ test("durable replay skips object/model extraction and uses detached stored resu
   if (result.status === "COMPLETED") result.extraction.artifact.payload.storedObjectRef.objectId = "mutated";
   const replay = await app.processGoldenPath(context, structuredClone(command));
   assert.equal(replay.status, "COMPLETED");
+});
+
+test("durable request identity binds the consequence Expectation", async () => {
+  let goldenCalls = 0;
+  const stored = ready();
+  const app = new ExtractionGoldenPath({
+    extractor: { async extract() { throw new Error("must not extract"); } },
+    persistence: {
+      async getExtraction() { return persisted(stored, "expectation-a"); },
+      async saveExtraction() { throw new Error("must not save"); },
+    },
+    goldenPath: { async recordConsequence() { goldenCalls += 1; return completed(); } },
+  });
+  const changed = structuredClone(command);
+  changed.operation.expectationId = "expectation-b";
+  await assert.rejects(app.processGoldenPath(context, changed), (error) =>
+    error instanceof DomainError && error.code === "EXTRACTION_REQUEST_CONFLICT");
+  assert.equal(goldenCalls, 0);
+});
+
+test("REVIEW_REQUIRED replay binds the requested FactCard even without a stored FactCard", async () => {
+  const stored = review();
+  const app = new ExtractionGoldenPath({
+    extractor: { async extract() { throw new Error("must not extract"); } },
+    persistence: {
+      async getExtraction() { return persisted(stored); },
+      async saveExtraction() { throw new Error("must not save"); },
+    },
+    goldenPath: { async recordConsequence() { throw new Error("must not process review"); } },
+  });
+  const changed = structuredClone(command);
+  changed.extraction.factCardId = "fact-b";
+  await assert.rejects(app.processGoldenPath(context, changed), (error) =>
+    error instanceof DomainError && error.code === "EXTRACTION_REQUEST_CONFLICT");
 });
 
 test("hostile and reversed commands fail before persistence lookup", async () => {

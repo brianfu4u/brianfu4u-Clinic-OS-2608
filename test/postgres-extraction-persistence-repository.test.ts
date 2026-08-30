@@ -42,6 +42,13 @@ const context = (clinicId = "clinic-a"): ActorContext => ({ clinicId, actorId: "
 const ref = (clinicId = "clinic-a"): StoredObjectRef => ({
   clinicId, objectId: "object-a", contentSha256: "a".repeat(64), sizeBytes: 123, mediaType: "image/png",
 });
+const objectRef = (objectId: string): StoredObjectRef => ({
+  clinicId: "clinic-a", objectId, contentSha256: "b".repeat(64), sizeBytes: 123, mediaType: "image/png",
+});
+const identity = (expectationId = "expectation-a") => ({
+  consequenceExpectationId: expectationId,
+  requestedFactCardId: "fact-a",
+});
 
 function ready(clinicId = "clinic-a"): StoredEvidenceExtractionResult {
   const objectRef = ref(clinicId);
@@ -98,16 +105,18 @@ test("READY atomically persists and traces Object, Artifact, FactCard and model 
   const pool = new PoolShim(); await pool.migrate();
   try {
     const repository = new ExtractionPersistenceRepository(pool);
-    const saved = await repository.saveExtraction(context(), ref(), ready());
-    assert.deepEqual(saved, ready());
+    const saved = await repository.saveExtraction(context(), ref(), ready(), identity());
+    assert.deepEqual(saved.extraction, ready());
     assert.deepEqual(await counts(pool), { objects: 1, artifacts: 1, facts: 1, attempts: 1 });
-    const trace = await pool.db.query(`SELECT f.id fact_id,a.request_id,a.object_id,a.model_id,a.model_manifest_sha256
+    const trace = await pool.db.query(`SELECT f.id fact_id,a.request_id,a.object_id,a.model_id,a.model_manifest_sha256,
+      a.consequence_expectation_id,a.requested_fact_card_id
       FROM evidence_fact_card f JOIN evidence_extraction_attempt a
       ON (a.clinic_id,a.fact_card_id)=(f.clinic_id,f.id)`);
     assert.deepEqual(trace.rows[0], {
       fact_id: "fact-a", request_id: "request-a", object_id: "object-a",
       model_id: EYE_EXAM_EXTRACTION_SPEC.modelId,
       model_manifest_sha256: EYE_EXAM_EXTRACTION_SPEC.modelManifestSha256,
+      consequence_expectation_id: "expectation-a", requested_fact_card_id: "fact-a",
     });
   } finally { await pool.close(); }
 });
@@ -115,8 +124,8 @@ test("READY atomically persists and traces Object, Artifact, FactCard and model 
 test("REVIEW_REQUIRED persists no FactCard and retains candidate reasons and parser lineage", async () => {
   const pool = new PoolShim(); await pool.migrate();
   try {
-    const saved = await new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), review());
-    assert.deepEqual(saved, review());
+    const saved = await new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), review(), identity());
+    assert.deepEqual(saved.extraction, review());
     assert.deepEqual(await counts(pool), { objects: 1, artifacts: 1, facts: 0, attempts: 1 });
   } finally { await pool.close(); }
 });
@@ -125,7 +134,7 @@ test("semantic replay is idempotent while changed object, outcome or lineage con
   const pool = new PoolShim(); await pool.migrate();
   try {
     const repository = new ExtractionPersistenceRepository(pool);
-    await repository.saveExtraction(context(), ref(), ready());
+    await repository.saveExtraction(context(), ref(), ready(), identity());
     const equivalent = ready();
     equivalent.artifact.occurredAt = "2026-08-30T18:00:00.000+09:00";
     equivalent.artifact.createdAt = "2026-08-30T18:00:01.000+09:00";
@@ -133,10 +142,38 @@ test("semantic replay is idempotent while changed object, outcome or lineage con
     equivalent.lineage.completedAt = "2026-08-30T18:00:02.000+09:00";
     equivalent.candidate.fields = { nested: { value: 1 }, reportType: "EYE_EXAM" };
     equivalent.factCard.fields = { reportType: "EYE_EXAM", nested: { value: 1 } };
-    assert.deepEqual((await repository.saveExtraction(context(), ref(), equivalent)).lineage, ready().lineage);
+    assert.deepEqual((await repository.saveExtraction(context(), ref(), equivalent, identity())).extraction.lineage, ready().lineage);
     const changed = ready(); changed.lineage.completedAt = "2026-08-30T09:00:03.000Z";
-    await assert.rejects(repository.saveExtraction(context(), ref(), changed), code("EXTRACTION_REQUEST_CONFLICT"));
+    await assert.rejects(repository.saveExtraction(context(), ref(), changed, identity()), code("EXTRACTION_REQUEST_CONFLICT"));
     assert.deepEqual(await counts(pool), { objects: 1, artifacts: 1, facts: 1, attempts: 1 });
+  } finally { await pool.close(); }
+});
+
+test("durable operation identity rejects Expectation and REVIEW FactCard replay changes", async () => {
+  const pool = new PoolShim(); await pool.migrate();
+  try {
+    const repository = new ExtractionPersistenceRepository(pool);
+    await repository.saveExtraction(context(), ref(), ready(), identity("expectation-a"));
+    await assert.rejects(
+      repository.saveExtraction(context(), ref(), ready(), identity("expectation-b")),
+      code("EXTRACTION_REQUEST_CONFLICT"),
+    );
+
+    const reviewRepository = new ExtractionPersistenceRepository(pool);
+    const reviewResult = review();
+    await reviewRepository.saveExtraction(context(), objectRef("review-object"), {
+      ...reviewResult,
+      artifact: { ...reviewResult.artifact, id: "review-artifact", payload: { storedObjectRef: objectRef("review-object") } },
+      lineage: { ...reviewResult.lineage, requestId: "review-request", objectContentSha256: objectRef("review-object").contentSha256 },
+    }, { consequenceExpectationId: "expectation-review", requestedFactCardId: "fact-review-a" });
+    await assert.rejects(
+      reviewRepository.saveExtraction(context(), objectRef("review-object"), {
+        ...reviewResult,
+        artifact: { ...reviewResult.artifact, id: "review-artifact", payload: { storedObjectRef: objectRef("review-object") } },
+        lineage: { ...reviewResult.lineage, requestId: "review-request", objectContentSha256: objectRef("review-object").contentSha256 },
+      }, { consequenceExpectationId: "expectation-review", requestedFactCardId: "fact-review-b" }),
+      code("EXTRACTION_REQUEST_CONFLICT"),
+    );
   } finally { await pool.close(); }
 });
 
@@ -144,10 +181,10 @@ test("tenant authority and same IDs in separate clinics remain isolated", async 
   const pool = new PoolShim(); await pool.migrate();
   try {
     const repository = new ExtractionPersistenceRepository(pool);
-    await repository.saveExtraction(context(), ref(), ready());
-    await repository.saveExtraction(context("clinic-b"), ref("clinic-b"), ready("clinic-b"));
+    await repository.saveExtraction(context(), ref(), ready(), identity());
+    await repository.saveExtraction(context("clinic-b"), ref("clinic-b"), ready("clinic-b"), identity());
     const attack = ready(); attack.artifact.clinicId = "clinic-b";
-    await assert.rejects(repository.saveExtraction(context(), ref(), attack), code("TENANT_SCOPE_VIOLATION"));
+    await assert.rejects(repository.saveExtraction(context(), ref(), attack, identity()), code("TENANT_SCOPE_VIOLATION"));
     assert.deepEqual(await counts(pool), { objects: 2, artifacts: 2, facts: 2, attempts: 2 });
   } finally { await pool.close(); }
 });
@@ -165,9 +202,9 @@ test("runtime shape, candidate authority, state contradictions and manifest hash
     const extraLineage = ready(); extraLineage.factCard.lineageArtifactIds.push("forged-extra");
     const replacedLineage = ready(); replacedLineage.factCard.lineageArtifactIds = ["nonexistent"];
     const before = pool.acquisitions;
-    for (const value of cases) await assert.rejects(repository.saveExtraction(context(), ref(), value));
-    await assert.rejects(repository.saveExtraction(context(), ref(), extraLineage), code("FACT_CARD_LINEAGE_INVALID"));
-    await assert.rejects(repository.saveExtraction(context(), ref(), replacedLineage), code("FACT_CARD_LINEAGE_INVALID"));
+    for (const value of cases) await assert.rejects(repository.saveExtraction(context(), ref(), value, identity()));
+    await assert.rejects(repository.saveExtraction(context(), ref(), extraLineage, identity()), code("FACT_CARD_LINEAGE_INVALID"));
+    await assert.rejects(repository.saveExtraction(context(), ref(), replacedLineage, identity()), code("FACT_CARD_LINEAGE_INVALID"));
     assert.equal(pool.acquisitions, before);
   } finally { await pool.close(); }
 });
@@ -196,7 +233,7 @@ test("top-level and nested accessors or proxies are rejected without trap execut
     const before = pool.acquisitions;
     for (const hostile of [topGetter, nestedGetter, nestedProxy, topProxy]) {
       await assert.rejects(
-        repository.saveExtraction(context(), ref(), hostile),
+        repository.saveExtraction(context(), ref(), hostile, identity()),
         code("INVALID_EXTRACTION_PERSISTENCE_INPUT"),
       );
     }
@@ -213,7 +250,7 @@ test("forced failure at every write stage rolls back the complete tenant unit", 
     const pool = new PoolShim(); await pool.migrate(); pool.failPattern = pattern;
     try {
       await assert.rejects(
-        new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), ready()),
+        new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), ready(), identity()),
         code("EXTRACTION_PERSISTENCE_FAILED"),
       );
       assert.deepEqual(await counts(pool), { objects: 0, artifacts: 0, facts: 0, attempts: 0 });
@@ -227,48 +264,51 @@ test("caller and returned mutation cannot change captured or stored extraction",
   try {
     const repository = new ExtractionPersistenceRepository(pool);
     const input = ready();
-    const pending = repository.saveExtraction(context(), ref(), input);
+    const pending = repository.saveExtraction(context(), ref(), input, identity());
     input.lineage.modelId = "mutated";
     input.candidate.fields.reportType = "mutated";
     resume();
     const saved = await pending;
     pool.gate = null;
-    saved.lineage.modelId = "returned-mutation";
-    saved.candidate.fields.reportType = "returned-mutation";
-    const replay = await repository.saveExtraction(context(), ref(), ready());
-    assert.equal(replay.lineage.modelId, EYE_EXAM_EXTRACTION_SPEC.modelId);
-    assert.equal(replay.candidate.fields.reportType, "EYE_EXAM");
+    saved.extraction.lineage.modelId = "returned-mutation";
+    saved.extraction.candidate.fields.reportType = "returned-mutation";
+    const replay = await repository.saveExtraction(context(), ref(), ready(), identity());
+    assert.equal(replay.extraction.lineage.modelId, EYE_EXAM_EXTRACTION_SPEC.modelId);
+    assert.equal(replay.extraction.candidate.fields.reportType, "EYE_EXAM");
   } finally { await pool.close(); }
 });
 
 test("SQL rejects broken composite lineage and READY/REVIEW contradictions", async () => {
   const pool = new PoolShim(); await pool.migrate();
   try {
-    await new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), ready());
+    await new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), ready(), identity());
     await assert.rejects(pool.db.query(`INSERT INTO evidence_extraction_attempt
       (clinic_id,request_id,object_id,object_content_sha256,artifact_id,fact_card_id,status,candidate,
        reason_codes,provider_kind,model_id,model_manifest_sha256,capability,schema_version,policy_version,
-       parser_version,completed_at)
+       parser_version,completed_at,consequence_expectation_id,requested_fact_card_id)
       SELECT clinic_id,'broken','object-a',$1,artifact_id,NULL,'READY',candidate,'{}',provider_kind,
-       model_id,model_manifest_sha256,capability,schema_version,policy_version,parser_version,completed_at
+       model_id,model_manifest_sha256,capability,schema_version,policy_version,parser_version,completed_at,
+       consequence_expectation_id,requested_fact_card_id
       FROM evidence_extraction_attempt WHERE request_id='request-a'`, ["b".repeat(64)]));
     await assert.rejects(pool.db.query(`INSERT INTO evidence_extraction_attempt
       (clinic_id,request_id,object_id,object_content_sha256,artifact_id,fact_card_id,status,candidate,
        reason_codes,provider_kind,model_id,model_manifest_sha256,capability,schema_version,policy_version,
-       parser_version,completed_at)
+       parser_version,completed_at,consequence_expectation_id,requested_fact_card_id)
       SELECT clinic_id,'contradiction',object_id,object_content_sha256,artifact_id,NULL,'READY',candidate,
        '{LOW_CONFIDENCE}',provider_kind,model_id,model_manifest_sha256,capability,schema_version,
-       policy_version,parser_version,completed_at FROM evidence_extraction_attempt WHERE request_id='request-a'`));
+       policy_version,parser_version,completed_at,consequence_expectation_id,requested_fact_card_id
+       FROM evidence_extraction_attempt WHERE request_id='request-a'`));
     await pool.db.query(`INSERT INTO stored_object_ref
       (clinic_id,object_id,content_sha256,size_bytes,media_type)
       VALUES ('clinic-b','object-a',$1,123,'image/png')`, ["b".repeat(64)]);
     await assert.rejects(pool.db.query(`INSERT INTO evidence_extraction_attempt
       (clinic_id,request_id,object_id,object_content_sha256,artifact_id,fact_card_id,status,candidate,
        reason_codes,provider_kind,model_id,model_manifest_sha256,capability,schema_version,policy_version,
-       parser_version,completed_at)
+       parser_version,completed_at,consequence_expectation_id,requested_fact_card_id)
       SELECT 'clinic-b','cross-clinic','object-a',$1,artifact_id,NULL,'REVIEW_REQUIRED',candidate,
        '{LOW_CONFIDENCE}',provider_kind,model_id,model_manifest_sha256,capability,schema_version,
-       policy_version,parser_version,completed_at FROM evidence_extraction_attempt WHERE request_id='request-a'`,
+       policy_version,parser_version,completed_at,consequence_expectation_id,requested_fact_card_id
+       FROM evidence_extraction_attempt WHERE request_id='request-a'`,
     ["b".repeat(64)]));
   } finally { await pool.close(); }
 });
@@ -276,7 +316,7 @@ test("SQL rejects broken composite lineage and READY/REVIEW contradictions", asy
 test("Object, Attempt and FactCard are append-only and new tables force exact RLS", async () => {
   const pool = new PoolShim(); await pool.migrate();
   try {
-    await new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), ready());
+    await new ExtractionPersistenceRepository(pool).saveExtraction(context(), ref(), ready(), identity());
     for (const table of ["stored_object_ref", "evidence_extraction_attempt", "evidence_fact_card"]) {
       await assert.rejects(pool.db.query(`UPDATE ${table} SET clinic_id=clinic_id`));
       await assert.rejects(pool.db.query(`DELETE FROM ${table}`));
