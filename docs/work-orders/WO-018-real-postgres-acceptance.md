@@ -36,18 +36,21 @@ Require four explicit URLs:
 - `WO018_SOURCE_APP_URL`
 - `WO018_RESTORE_ADMIN_URL`
 - `WO018_RESTORE_APP_URL`
+- `WO018_ALLOW_DESTRUCTIVE_RESET=I_UNDERSTAND_WO018_DATABASES_WILL_BE_DROPPED`
 
 Safety preflight before any write:
 
-- source and restore are different databases;
+- source and restore resolve to different real database identities, using server system identifier plus database OID rather than URL/DNS spelling;
 - both database names end exactly `_wo018_acceptance`;
-- restore has no Clinic OS business tables;
+- both source and restore `public` schemas contain no user tables, views, materialized views, sequences, foreign tables, functions or user-defined types before any destructive action;
 - admin and app are different LOGIN roles;
 - app is not owner, superuser or `BYPASSRLS`;
 - `pg_dump` and `pg_restore` exist and report a supported major version;
 - never print URLs, passwords, row payloads, PHI or raw database errors.
 
 Use bounded statement/lock timeouts. Temporary dump files use an isolated temporary directory and are removed in `finally`.
+
+Schema reset uses `DROP SCHEMA + CREATE SCHEMA` in one explicit transaction. No cleanup runs for a database that did not pass every safety preflight. Cleanup failure is a failed acceptance result; `PASS` may be printed only after successful cleanup and resource closure.
 
 ## 4. RLS gate
 
@@ -58,7 +61,8 @@ Apply accepted migrations through source admin, grant only required schema/table
 3. without transaction-local `app.clinic_id`, app reads no tenant rows and writes fail;
 4. tenant A cannot read/write tenant B rows;
 5. COMMIT/ROLLBACK and pooled connection reuse do not leak the prior clinic setting;
-6. at least one accepted repository read/write runs through the real app connection.
+6. every business table receives synthetic rows for tenants A and B, and each tenant context can see only its own rows;
+7. at least one accepted repository read/write runs through the real app connection.
 
 ## 5. Concurrency gate
 
@@ -90,11 +94,14 @@ Record the dump SHA-256 without printing data. Restore only into the preflighted
 - restored app is still non-owner/NOSUPERUSER/NOBYPASSRLS;
 - restored app passes cross-tenant RLS and at least one accepted repository read/write.
 
+Source and restore must also compare a canonical catalog digest for constraints, tenant policies and triggers. Exercise append-only protection with real UPDATE/DELETE attacks, not trigger-name inspection alone.
+
 ## 7. Harness behavior
 
 - Stable labeled progress and failure codes; no connection strings or raw SQL errors.
 - Any failed required assertion exits non-zero.
-- Signal/exception cleanup removes temporary dump content and closes pools.
+- Signal/exception cleanup removes temporary dump content and closes pools; cleanup errors cannot be swallowed into a successful exit.
+- Query source/restore `server_version_num`; only 16/17 are accepted. `pg_dump` and `pg_restore` must share that server major.
 - The harness may seed synthetic `WO018-` data only.
 - `acceptance/real-postgres.test.ts` is the executable real-server suite, not a mocked unit test.
 
