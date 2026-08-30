@@ -51,12 +51,14 @@ class FixtureProvider implements InferenceProvider {
   modelId = "deterministic-local-fixture";
   invocations = 0;
   requests: InferenceRequest[] = [];
+  contexts: ActorContext[] = [];
   output: unknown = READY;
   responseMutation: (response: InferenceResponse) => InferenceResponse = (value) => value;
   wait: Promise<void> | null = null;
 
-  async infer(_context: ActorContext, request: InferenceRequest): Promise<InferenceResponse> {
+  async infer(context: ActorContext, request: InferenceRequest): Promise<InferenceResponse> {
     this.invocations += 1;
+    this.contexts.push(structuredClone(context));
     this.requests.push(structuredClone(request));
     if (this.wait) await this.wait;
     return this.responseMutation({
@@ -132,6 +134,8 @@ test("identity and authority never enter inference input or receipts", async (t)
   assert.deepEqual(Object.keys((provider.requests[0].input as Record<string, unknown>)).sort(), [
     "bytes", "contentSha256", "kind", "mediaType",
   ]);
+  assert.deepEqual(provider.contexts[0], CONTEXT);
+  assert.deepEqual(Object.keys(provider.contexts[0]).sort(), ["actorId", "clinicId", "role"]);
   const auditText = JSON.stringify({ receipt: inference.listReceipts(CONTEXT) });
   assert.doesNotMatch(auditText, /PATIENT-007|synthetic eye report|report-7/);
 });
@@ -195,6 +199,50 @@ test("response request, schema and model mismatches fail without FactCard", asyn
   }
 });
 
+test("service validates inference envelopes even behind a structural fake port", async (t) => {
+  const { ref, objects } = await setup(t);
+  const invalid = [
+    { requestId: "other", providerKind: "LOCAL_MODEL", modelId: EYE_EXAM_EXTRACTION_SPEC.modelId, schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30T12:00:00.000Z" },
+    { requestId: "extract-1", providerKind: "PRIVATE_CLOUD_MODEL", modelId: EYE_EXAM_EXTRACTION_SPEC.modelId, schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30T12:00:00.000Z" },
+    { requestId: "extract-1", providerKind: "LOCAL_MODEL", modelId: "wrong-model", schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30T12:00:00.000Z" },
+    { requestId: "extract-1", providerKind: "LOCAL_MODEL", modelId: EYE_EXAM_EXTRACTION_SPEC.modelId, schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30 12:00:00" },
+    { requestId: "extract-1", providerKind: "LOCAL_MODEL", modelId: EYE_EXAM_EXTRACTION_SPEC.modelId, schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30T12:00:00.000Z", authority: true },
+  ];
+  for (const response of invalid) {
+    const service = new StoredEvidenceExtractionService({
+      objects,
+      inference: { infer: async () => response as InferenceResponse },
+    });
+    await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_INFERENCE_RESPONSE"));
+  }
+});
+
+test("candidate accessors, symbols, custom prototypes and hostile proxies fail without getter execution", async (t) => {
+  const { ref, objects } = await setup(t);
+  let getterCalls = 0;
+  const accessor = { ...READY, fields: {} } as Record<string, unknown>;
+  Object.defineProperty(accessor.fields, "reportType", {
+    enumerable: true,
+    get() { getterCalls += 1; return "fundus"; },
+  });
+  const symbol = { ...READY, fields: { reportType: "fundus", [Symbol("hidden")]: true } };
+  const custom = { ...READY, fields: Object.assign(Object.create({ inherited: true }), { reportType: "fundus" }) };
+  const proxy = new Proxy(READY, { ownKeys() { throw new Error("hostile"); } });
+  for (const output of [accessor, symbol, custom, proxy]) {
+    const response = {
+      requestId: "extract-1",
+      providerKind: "LOCAL_MODEL" as const,
+      modelId: EYE_EXAM_EXTRACTION_SPEC.modelId,
+      schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion,
+      output,
+      completedAt: "2026-08-30T12:00:00.000Z",
+    };
+    const service = new StoredEvidenceExtractionService({ objects, inference: { infer: async () => response } });
+    await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_EXTRACTION_CANDIDATE"));
+  }
+  assert.equal(getterCalls, 0);
+});
+
 test("taxonomy escape, non-JSON values, oversized fields and invalid confidence fail", async (t) => {
   const outputs: unknown[] = [
     { ...READY, subjectTypeCandidate: "DEVICE" },
@@ -216,6 +264,8 @@ test("low confidence or declared missing required fields returns review only", a
   for (const output of [
     { ...READY, confidence: 0.79 },
     { ...READY, fields: {}, missingFields: ["reportType"] },
+    { ...READY, fields: { reportType: null }, missingFields: [] },
+    { ...READY, fields: { reportType: "  " }, missingFields: [] },
   ]) {
     const { ref, provider, service } = await setup(t);
     provider.output = output;
@@ -231,6 +281,20 @@ test("missing patient anchor and extra caller authority fail before reads or inf
   const before = objects.listReceipts(CONTEXT).length;
   await assert.rejects(service.extract(CONTEXT, { ...command(ref), identityAnchor: null }), code("IDENTITY_ANCHOR_REQUIRED"));
   await assert.rejects(service.extract(CONTEXT, { ...command(ref), clinicId: "clinic-2" } as never), code("INVALID_EXTRACTION_COMMAND"));
+  await assert.rejects(service.extract({ ...CONTEXT, identityAnchor: "PATIENT-007" } as never, command(ref)), code("INVALID_ACTOR_CONTEXT"));
+  assert.equal(objects.listReceipts(CONTEXT).length, before);
+  assert.equal(provider.invocations, 0);
+});
+
+test("Artifact occurrence provenance combinations fail closed before object read", async (t) => {
+  const { ref, provider, objects, service } = await setup(t);
+  const before = objects.listReceipts(CONTEXT).length;
+  for (const invalid of [
+    { ...command(ref), occurredAt: null, occurredAtSource: "source" as const },
+    { ...command(ref), occurredAt: "2026-08-30T11:00:00.000Z", occurredAtSource: "unknown" as const },
+  ]) {
+    await assert.rejects(service.extract(CONTEXT, invalid), code("INVALID_EXTRACTION_COMMAND"));
+  }
   assert.equal(objects.listReceipts(CONTEXT).length, before);
   assert.equal(provider.invocations, 0);
 });

@@ -18,7 +18,11 @@ const CANDIDATE_KEYS = [
 const REF_KEYS = ["clinicId", "contentSha256", "mediaType", "objectId", "sizeBytes"];
 const SPEC_KEYS = [
   "allowedMediaTypes", "artifactKind", "capability", "minimumConfidence", "parserVersion",
-  "policyVersion", "requiredFields", "schemaVersion", "subjectType", "workflowFamily",
+  "policyVersion", "providerKind", "modelId", "requiredFields", "schemaVersion", "subjectType",
+  "workflowFamily",
+];
+const RESPONSE_KEYS = [
+  "completedAt", "modelId", "output", "providerKind", "requestId", "schemaVersion",
 ];
 const ALLOWED_MEDIA = ["application/pdf", "image/jpeg", "image/png"] as const;
 const FORBIDDEN_KEYS = new Set([
@@ -27,7 +31,8 @@ const FORBIDDEN_KEYS = new Set([
   "lineage", "lineageArtifactIds", "linkId", "occurredAt", "receivedAt", "reasoningChain", "role",
   "satisfiedByArtifactId", "sourceEmployeeId", "state", "status", "triggerArtifactId", "triggeredAt",
   "consequenceArtifactId", "dueAt", "evidenceArtifactIds", "updatedAt", "verificationId", "voided",
-  "workflowId",
+  "workflowId", "artifact", "factCard", "workflow", "link", "expectation", "verification",
+  "decision", "verdict",
 ]);
 const MAX_FIELD_COUNT = 64;
 const MAX_FIELDS_JSON_BYTES = 64 * 1024;
@@ -43,6 +48,8 @@ export interface ExtractionSpec {
   workflowFamily: string;
   requiredFields: readonly string[];
   minimumConfidence: number;
+  providerKind: InferenceResponse["providerKind"];
+  modelId: string;
 }
 
 export const EYE_EXAM_EXTRACTION_SPEC: Readonly<ExtractionSpec> = Object.freeze({
@@ -56,6 +63,8 @@ export const EYE_EXAM_EXTRACTION_SPEC: Readonly<ExtractionSpec> = Object.freeze(
   workflowFamily: "EYE_EXAM",
   requiredFields: Object.freeze(["reportType"]),
   minimumConfidence: 0.8,
+  providerKind: "LOCAL_MODEL",
+  modelId: "deterministic-local-fixture",
 });
 
 export interface StoredEvidenceExtractionCommand {
@@ -138,6 +147,7 @@ export class StoredEvidenceExtractionService {
     context: ActorContext,
     command: StoredEvidenceExtractionCommand,
   ): Promise<StoredEvidenceExtractionResult> {
+    exactObject(context, ["actorId", "clinicId", "role"], "INVALID_ACTOR_CONTEXT");
     const captured = structuredClone({ context, command });
     assertActorContext(captured.context);
     validateCommand(captured.context, captured.command, this.#spec);
@@ -147,7 +157,7 @@ export class StoredEvidenceExtractionService {
     });
     const stored = validateStoredObject(storedResponse, captured.command.objectRef);
 
-    const response = await this.#inference.infer(captured.context, {
+    const inferenceRequest: InferenceRequest = {
       requestId: captured.command.requestId,
       clinicId: captured.context.clinicId,
       capability: this.#spec.capability,
@@ -158,7 +168,12 @@ export class StoredEvidenceExtractionService {
         contentSha256: stored.ref.contentSha256,
         kind: captured.command.kind,
       },
-    });
+    };
+    const response = validateInferenceResponse(
+      await this.#inference.infer(captured.context, inferenceRequest),
+      inferenceRequest,
+      this.#spec,
+    );
     const candidate = validateCandidate(response.output, this.#spec);
     const artifact: Artifact = {
       id: captured.command.artifactId,
@@ -234,7 +249,7 @@ function validateSpec(spec: ExtractionSpec): ExtractionSpec {
     spec.requiredFields.some((field) => !nonblank(field)) ||
     new Set(spec.requiredFields).size !== spec.requiredFields.length ||
     !Number.isFinite(spec.minimumConfidence) || spec.minimumConfidence < 0 ||
-    spec.minimumConfidence > 1) {
+    spec.minimumConfidence > 1 || spec.providerKind !== "LOCAL_MODEL" || !nonblank(spec.modelId)) {
     throw new DomainError("INVALID_EXTRACTION_SPEC", "Extraction specification is invalid.");
   }
   return Object.freeze({
@@ -254,7 +269,8 @@ function validateCommand(
     command.kind !== spec.artifactKind ||
     !["source", "employee_confirmed", "unknown"].includes(command.occurredAtSource) ||
     parseStrictIsoInstant(command.createdAt) === null ||
-    (command.occurredAt !== null && parseStrictIsoInstant(command.occurredAt) === null)) {
+    (command.occurredAt !== null && parseStrictIsoInstant(command.occurredAt) === null) ||
+    (command.occurredAt === null) !== (command.occurredAtSource === "unknown")) {
     throw new DomainError("INVALID_EXTRACTION_COMMAND", "Extraction command is invalid.");
   }
   validateObjectRef(command.objectRef);
@@ -297,6 +313,7 @@ function validateObjectRef(ref: StoredObjectRef): void {
 function validateCandidate(output: unknown, spec: ExtractionSpec): ExtractionCandidate {
   let candidate: ExtractionCandidate;
   try {
+    assertSafeCandidateData(output, 0);
     candidate = structuredClone(output) as ExtractionCandidate;
   } catch {
     throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate is not cloneable.");
@@ -315,14 +332,75 @@ function validateCandidate(output: unknown, spec: ExtractionSpec): ExtractionCan
   }
   if (candidate.missingFields.some((field) => !spec.requiredFields.includes(field)) ||
     new Set(candidate.missingFields).size !== candidate.missingFields.length ||
-    spec.requiredFields.some((field) => Object.hasOwn(candidate.fields, field) === candidate.missingFields.includes(field))) {
+    candidate.missingFields.some((field) => !missingValue(candidate.fields[field]))) {
     throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction missing fields are inconsistent.");
   }
+  const derivedMissing = spec.requiredFields.filter((field) => missingValue(candidate.fields[field]));
   return Object.freeze({
     ...candidate,
     fields: structuredClone(candidate.fields),
-    missingFields: Object.freeze([...candidate.missingFields]) as unknown as string[],
+    missingFields: Object.freeze([...derivedMissing]) as unknown as string[],
   });
+}
+
+function validateInferenceResponse(
+  value: unknown,
+  request: InferenceRequest,
+  spec: ExtractionSpec,
+): InferenceResponse {
+  let descriptors: Record<PropertyKey, PropertyDescriptor>;
+  try {
+    if (!plainObject(value) || Reflect.ownKeys(value).some((key) => typeof key === "symbol")) throw new Error();
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Object.values(descriptors).some((descriptor) => !Object.hasOwn(descriptor, "value"))) throw new Error();
+  } catch {
+    throw new DomainError("INVALID_INFERENCE_RESPONSE", "Inference response envelope is invalid.");
+  }
+  const response = Object.fromEntries(
+    Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]),
+  ) as unknown as InferenceResponse;
+  exactObject(response, RESPONSE_KEYS, "INVALID_INFERENCE_RESPONSE");
+  if (response.requestId !== request.requestId || response.schemaVersion !== request.schemaVersion ||
+    response.providerKind !== spec.providerKind || response.modelId !== spec.modelId ||
+    parseStrictIsoInstant(response.completedAt) === null) {
+    throw new DomainError("INVALID_INFERENCE_RESPONSE", "Inference response does not match the frozen request.");
+  }
+  return response;
+}
+
+function assertSafeCandidateData(value: unknown, depth: number): void {
+  try {
+    if (depth > 16) throw new Error();
+    if (value === null || ["string", "boolean"].includes(typeof value)) return;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw new Error();
+      return;
+    }
+    if (typeof value !== "object") throw new Error();
+    const array = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) throw new Error();
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key === "symbol")) throw new Error();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (array) {
+      if (Object.keys(descriptors).some((key) => key !== "length" && !/^(0|[1-9]\d*)$/.test(key))) throw new Error();
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(descriptors, String(index))) throw new Error();
+      }
+    }
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (key === "length" && array) continue;
+      if (!Object.hasOwn(descriptor, "value")) throw new Error();
+      if (FORBIDDEN_KEYS.has(key)) {
+        throw new DomainError("EXTRACTION_AUTHORITY_INJECTION", "Model output contains a forbidden authority field.");
+      }
+      assertSafeCandidateData(descriptor.value, depth + 1);
+    }
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate must be inert JSON data.");
+  }
 }
 
 function validateJson(value: unknown, depth: number): void {
@@ -362,6 +440,10 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 
 function nonblank(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function missingValue(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === "string" && value.trim() === "");
 }
 
 function sameRef(left: StoredObjectRef, right: StoredObjectRef): boolean {
