@@ -104,6 +104,11 @@ object bytes, persists the validated result, and sends only `READY` results to t
 persisted Workflow/Expectation/S2 path. `REVIEW_REQUIRED` stops at extraction for human review;
 replays reuse the stored lineage and never rerun inference.
 
+The local preview also exposes `POST /api/employee/extraction/exam-report` when a persisted
+extraction backend is explicitly configured. It accepts a bounded JSON consequence command for
+an already-stored object, injects the server employee context, and returns only a bounded
+completed/review projection; synthetic preview never falls back to this durable route.
+
 The first real local OCR adapter uses the exact hashed Tesseract 5.3.4 English baseline documented
 in `models/tesseract-eng-v1.manifest.json`. Its separate non-PHI synthetic smoke gate is:
 

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 
 import { PersistedGoldenPath } from "../application/persisted-golden-path.ts";
+import {
+  ExtractionGoldenPath,
+  type ProcessGoldenPathCommand,
+  type ProcessGoldenPathResult,
+} from "../application/extraction-golden-path.ts";
 import { assertActorAccess } from "../domain/access-context.ts";
 import type { ActorContext, Artifact, EvidenceFactCard, ManagerDecisionAction } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
@@ -44,6 +49,10 @@ export interface ClinicalManagerDecisionInput {
 
 export interface ClinicalPreviewBackend {
   submitWorkUpdate(context: ActorContext, input: ClinicalWorkUpdateInput): Promise<ClinicalWorkUpdateResult>;
+  submitExamReportConsequence?(
+    context: ActorContext,
+    command: ProcessGoldenPathCommand,
+  ): Promise<ProcessGoldenPathResult>;
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]>;
   submitManagerDecision(
     context: ActorContext,
@@ -53,11 +62,12 @@ export interface ClinicalPreviewBackend {
 
 export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
   readonly #path: PersistedGoldenPath;
+  readonly #extractionPath?: ExtractionGoldenPath;
   readonly #capture: CaptureRepository;
   readonly #closures: ManagerClosureReadRepository;
   readonly #decisions: ManagerDecisionRepository;
 
-  constructor(pool: DatabasePool) {
+  constructor(pool: DatabasePool, options: { extractionGoldenPath?: ExtractionGoldenPath } = {}) {
     this.#capture = new CaptureRepository(pool);
     this.#path = new PersistedGoldenPath({
       capture: this.#capture,
@@ -67,6 +77,21 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     });
     this.#closures = new ManagerClosureReadRepository(pool);
     this.#decisions = new ManagerDecisionRepository(pool);
+    this.#extractionPath = options.extractionGoldenPath;
+  }
+
+  async submitExamReportConsequence(
+    context: ActorContext,
+    command: ProcessGoldenPathCommand,
+  ): Promise<ProcessGoldenPathResult> {
+    assertActorAccess(context, context.clinicId, "EMPLOYEE");
+    if (!this.#extractionPath) {
+      throw new DomainError(
+        "PERSISTED_TRANSPORT_UNAVAILABLE",
+        "Persisted extraction transport is not configured.",
+      );
+    }
+    return this.#extractionPath.processGoldenPath(context, command);
   }
 
   async submitWorkUpdate(
