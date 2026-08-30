@@ -1,6 +1,6 @@
 # WO-029 — Persisted Employee Registration Trigger
 
-**Status:** Ready for Builder  
+**Status:** Accepted — Architecture Review passed 2026-08-30  
 **Architect:** Codex Architecture Designer  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
 **Depends on:** Constitution, WO-005, WO-015, WO-016, WO-023 through WO-028
@@ -272,3 +272,18 @@ feat(preview): add persisted registration trigger
 
 Do not push before independent Architecture Review. Report changed files, test count, the external
 PostgreSQL gate separately, and any deviation.
+
+## Architecture acceptance
+
+Accepted after commits `4e12add` and `9185c5d`, followed by independent review.
+
+- Full regression: 347/347.
+- Targeted registration/preview tests, Domain Demo and Runtime Demo: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- The trigger snapshots exact ActorContext before its first await; delayed caller mutation cannot
+  change clinic, actor, IDs or durable writes.
+- The persistent profile disables legacy clinical work-update writes; synthetic mode cannot claim
+  durable registration success.
+- GitHub push remains deferred for the batch release.
