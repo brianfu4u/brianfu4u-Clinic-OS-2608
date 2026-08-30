@@ -71,3 +71,9 @@ volatile synthetic preview state. The default `npm run preview` path remains who
 missing PostgreSQL configuration never silently selects it as a persistence fallback.
 Reopen/correction flows, real PostgreSQL application-role
 RLS/concurrency proof, backup and restore remain separate acceptance gates.
+
+The tenant-scoped due-Expectation batch is an explicit manager command, not a scheduler.
+It advances a bounded keyset page inside one transaction and isolates controlled item failures
+with loop-index savepoints before persisting S2. `nextCursor` advances past every selected row,
+including failed rows; retry failed rows with a later run starting from a null cursor. Because
+locked rows may be skipped, the command does not claim `hasMore` or real-server worker parity.

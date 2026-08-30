@@ -246,11 +246,28 @@ export class ExpectationRepository {
     }
     const canonicalEvaluatedAt = new Date(evaluationInstant).toISOString();
 
-    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) => {
-      const expectation = await findExpectation(
+    return withTenantTransaction(this.#pool, captured.context.clinicId, (client) =>
+      reevaluateExpectationInTransaction(
         client,
         captured.context.clinicId,
         captured.expectationId,
+        canonicalEvaluatedAt,
+      ));
+  }
+}
+
+/** Trusted internal core: caller must already hold a tenant-scoped transaction. */
+export async function reevaluateExpectationInTransaction(
+  client: TenantQueryClient,
+  clinicId: string,
+  expectationId: string,
+  canonicalEvaluatedAt: string,
+): Promise<ReevaluatedExpectation> {
+      const evaluationInstant = parseStrictIsoInstant(canonicalEvaluatedAt) as number;
+      const expectation = await findExpectation(
+        client,
+        clinicId,
+        expectationId,
       );
       if (!expectation) {
         throw new DomainError(
@@ -261,7 +278,7 @@ export class ExpectationRepository {
 
       const workflow = await findWorkflow(
         client,
-        captured.context.clinicId,
+        clinicId,
         expectation.workflowId,
       );
       if (!workflow) {
@@ -273,7 +290,7 @@ export class ExpectationRepository {
 
       const initialization = await findInitializationTransition(
         client,
-        captured.context.clinicId,
+        clinicId,
         expectation.id,
       );
       if (!initialization || initialization.workflowId !== workflow.id) {
@@ -283,7 +300,7 @@ export class ExpectationRepository {
         );
       }
 
-      const linked = await findLinkedArtifacts(client, captured.context.clinicId, workflow.id);
+      const linked = await findLinkedArtifacts(client, clinicId, workflow.id);
       const visible = linked.filter(({ artifact, attachedAt }) => {
         const attachedInstant = parseStrictIsoInstant(attachedAt);
         if (attachedInstant === null) {
@@ -331,12 +348,12 @@ export class ExpectationRepository {
       const transition = makeReevaluationTransition(evaluated, expectation.state, trigger.id);
       const existingById = await findTransition(
         client,
-        captured.context.clinicId,
+        clinicId,
         transition.id,
       );
       const existingAtInstant = await findTransitionAtEvaluation(
         client,
-        captured.context.clinicId,
+        clinicId,
         expectation.id,
         canonicalEvaluatedAt,
       );
@@ -350,7 +367,7 @@ export class ExpectationRepository {
       await insertTransition(client, transition);
       const storedTransition = await findTransition(
         client,
-        captured.context.clinicId,
+        clinicId,
         transition.id,
       );
       if (!storedTransition || !transitionEqual(storedTransition, transition)) {
@@ -372,8 +389,6 @@ export class ExpectationRepository {
         );
       }
       return structuredClone({ expectation: storedExpectation, transition: storedTransition });
-    });
-  }
 }
 
 function validateInput(

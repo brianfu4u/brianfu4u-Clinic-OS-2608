@@ -109,20 +109,30 @@ export class VerificationRepository {
       throw new DomainError("EXPECTATION_ID_REQUIRED", "Expectation ID is required.");
     }
 
-    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) => {
-      const expectation = await findExpectation(client, captured.context.clinicId, captured.expectationId);
+    return withTenantTransaction(this.#pool, captured.context.clinicId, (client) =>
+      verifyCurrentExpectationInTransaction(client, captured.context.clinicId, captured.expectationId));
+  }
+}
+
+/** Trusted internal core: caller must already hold a tenant-scoped transaction. */
+export async function verifyCurrentExpectationInTransaction(
+  client: TenantQueryClient,
+  clinicId: string,
+  expectationId: string,
+): Promise<PersistedVerification> {
+      const expectation = await findExpectation(client, clinicId, expectationId);
       if (!expectation) {
         throw new DomainError("EXPECTATION_NOT_FOUND", "Expectation is not readable in this clinic.");
       }
       validateExpectationTimes(expectation);
 
-      const workflow = await findWorkflow(client, captured.context.clinicId, expectation.workflowId);
+      const workflow = await findWorkflow(client, clinicId, expectation.workflowId);
       if (!workflow) {
         throw new DomainError("WORKFLOW_NOT_FOUND", "Workflow is not readable in this clinic.");
       }
       validateWorkflow(workflow);
 
-      const source = await findSourceTransition(client, captured.context.clinicId, expectation);
+      const source = await findSourceTransition(client, clinicId, expectation);
       if (!source || !sourceMatchesProjection(source, expectation)) {
         throw new DomainError(
           "VERIFICATION_SOURCE_TRANSITION_NOT_FOUND",
@@ -131,8 +141,8 @@ export class VerificationRepository {
       }
       validateSourceTransition(source);
       const evaluatedAt = requireTimestamp(source.evaluatedAt, "INVALID_VERIFICATION_TIME");
-      const recordId = `verification:${VERIFIER_VERSION}:${captured.context.clinicId}:${source.id}`;
-      const existing = await findVerification(client, captured.context.clinicId, recordId);
+      const recordId = `verification:${VERIFIER_VERSION}:${clinicId}:${source.id}`;
+      const existing = await findVerification(client, clinicId, recordId);
       if (workflow.status !== "OPEN" && !existing) {
         throw new DomainError(
           "WORKFLOW_TERMINAL",
@@ -142,7 +152,7 @@ export class VerificationRepository {
 
       const artifacts = await findVisibleLinkedArtifacts(
         client,
-        captured.context.clinicId,
+        clinicId,
         workflow.id,
         evaluatedAt,
       );
@@ -156,13 +166,13 @@ export class VerificationRepository {
       const proposed: S2VerificationRecord = {
         ...result,
         id: recordId,
-        clinicId: captured.context.clinicId,
+        clinicId,
         sourceTransitionId: source.id,
         verifierVersion: VERIFIER_VERSION,
       };
 
       if (!existing) await insertVerification(client, proposed);
-      const stored = await findVerification(client, captured.context.clinicId, recordId);
+      const stored = await findVerification(client, clinicId, recordId);
       if (!stored || !recordEqual(stored, proposed)) {
         throw new DomainError(
           "S2_VERIFICATION_CONFLICT",
@@ -170,8 +180,6 @@ export class VerificationRepository {
         );
       }
       return structuredClone({ result: resultFromRecord(stored), record: stored });
-    });
-  }
 }
 
 async function findExpectation(
