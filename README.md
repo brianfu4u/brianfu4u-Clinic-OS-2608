@@ -88,3 +88,7 @@ The command requires four explicit dedicated-database URLs, the destructive-rese
 documented in the runbook, and same-major PostgreSQL 16/17 server/client binaries.
 It is destructive, fails non-zero when its environment is absent, and never reports a skipped gate
 as success. See `docs/runbooks/postgres-real-acceptance.md` before running it.
+
+Original evidence bytes now have a narrow immutable object-store boundary. The On-Prem provider
+uses an explicitly configured absolute local root, atomic no-overwrite writes and integrity checks;
+the gateway enforces a 25 MiB per-object limit. It is not yet wired to Artifact persistence or OCR.
