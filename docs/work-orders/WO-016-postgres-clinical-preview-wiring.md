@@ -1,6 +1,6 @@
 # WO-016 — PostgreSQL Clinical Preview Wiring
 
-**Status:** FROZEN
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -127,3 +127,19 @@ git diff --check
 ## 10. Builder handoff
 
 The Builder must read the Constitution and WO-002, WO-003, WO-013 through WO-016, implement only this vertical preview slice, run all acceptance commands, commit as `feat(preview): wire postgres clinical backend`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 11. Architecture acceptance
+
+Accepted on 2026-08-30 through `8518b77` after independent review and one mandatory correction cycle.
+
+- 234/234 tests, 21/21 targeted PostgreSQL preview/decision tests and both demos pass.
+- Registration, report, manager read and manager decision use the accepted PostgreSQL authorities; the clinical chain and close survive server restart.
+- Explicit PostgreSQL mode requires `DATABASE_URL` and never silently falls back to memory; migrations remain explicit.
+- Ordinary chat never acquires the clinical database, and database failure produces no local success message.
+- Stable opaque idempotency keys bind deterministic IDs; first server receipt time is persisted and reused on exact replay without trusting caller time.
+- UI retry retains the current action key, local messages deduplicate by topic/action, and edited/new actions receive new keys.
+- Manager decision lookup is manager-only, tenant-scoped and detached; manager payload excludes raw evidence, employee conversation and decision note.
+- `CLOSE_STANDARD` is offered only for `MET + VERIFIED`; incomplete chains expose no executable form.
+- No migration, dependency, ORM, auth framework, scheduler or event bus was added.
+
+Durable employee conversation/session state, automatic due-time evaluation, real PostgreSQL application-role RLS/concurrency, backup/restore and production authentication remain later acceptance gates.
