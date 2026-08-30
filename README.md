@@ -126,3 +126,9 @@ npm run accept:ocr-local
 Passing this command proves only the English adapter path. Strict network isolation and approved
 Japanese/Chinese clinical-language accuracy remain open deployment gates; see
 `docs/runbooks/local-ocr-acceptance.md`.
+
+The persisted preview also accepts one bounded employee evidence upload at
+`POST /api/employee/evidence-objects`. Send a single `multipart/form-data` part named `file`
+(PNG, JPEG or PDF) with an `Idempotency-Key`; the response contains only the server-derived
+`objectRef` needed by the extraction route. Synthetic preview deliberately returns
+`PERSISTED_UPLOAD_UNAVAILABLE` instead of pretending that an upload is durable.

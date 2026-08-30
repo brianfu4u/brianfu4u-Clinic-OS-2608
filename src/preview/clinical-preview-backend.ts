@@ -17,6 +17,11 @@ import { ManagerDecisionRepository, type PersistedManagerDecisionResult } from "
 import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
 import { VerificationRepository } from "../persistence/verification-repository.ts";
 import { WorkflowAttachRepository } from "../persistence/workflow-attach-repository.ts";
+import type {
+  EvidenceObjectIngestionInput,
+  EvidenceObjectIngestionService,
+} from "../application/evidence-object-ingestion.ts";
+import type { StoredObjectRef } from "../storage/contracts.ts";
 
 export interface ClinicalWorkUpdateInput {
   kind: "REGISTRATION" | "EXAM_REPORT";
@@ -53,6 +58,10 @@ export interface ClinicalPreviewBackend {
     context: ActorContext,
     command: ProcessGoldenPathCommand,
   ): Promise<ProcessGoldenPathResult>;
+  uploadEvidenceObject?(
+    context: ActorContext,
+    input: EvidenceObjectIngestionInput,
+  ): Promise<StoredObjectRef>;
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]>;
   submitManagerDecision(
     context: ActorContext,
@@ -63,11 +72,15 @@ export interface ClinicalPreviewBackend {
 export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
   readonly #path: PersistedGoldenPath;
   readonly #extractionPath?: ExtractionGoldenPath;
+  readonly #objectIngestion?: Pick<EvidenceObjectIngestionService, "ingest">;
   readonly #capture: CaptureRepository;
   readonly #closures: ManagerClosureReadRepository;
   readonly #decisions: ManagerDecisionRepository;
 
-  constructor(pool: DatabasePool, options: { extractionGoldenPath?: ExtractionGoldenPath } = {}) {
+  constructor(pool: DatabasePool, options: {
+    extractionGoldenPath?: ExtractionGoldenPath;
+    objectIngestion?: Pick<EvidenceObjectIngestionService, "ingest">;
+  } = {}) {
     this.#capture = new CaptureRepository(pool);
     this.#path = new PersistedGoldenPath({
       capture: this.#capture,
@@ -78,6 +91,18 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     this.#closures = new ManagerClosureReadRepository(pool);
     this.#decisions = new ManagerDecisionRepository(pool);
     this.#extractionPath = options.extractionGoldenPath;
+    this.#objectIngestion = options.objectIngestion;
+  }
+
+  async uploadEvidenceObject(
+    context: ActorContext,
+    input: EvidenceObjectIngestionInput,
+  ): Promise<StoredObjectRef> {
+    assertActorAccess(context, context.clinicId, "EMPLOYEE");
+    if (!this.#objectIngestion) {
+      throw new DomainError("PERSISTED_UPLOAD_UNAVAILABLE", "Persisted evidence upload is not configured.");
+    }
+    return this.#objectIngestion.ingest(context, input);
   }
 
   async submitExamReportConsequence(

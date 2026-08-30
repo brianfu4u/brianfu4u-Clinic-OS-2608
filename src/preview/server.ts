@@ -1,12 +1,18 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { chmod, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { DomainError } from "../domain/errors.ts";
 import type { ActorContext, ManagerDecisionAction } from "../domain/contracts.ts";
 import { assertActorAccess, assertActorContext } from "../domain/access-context.ts";
 import type { ProcessGoldenPathCommand, ProcessGoldenPathResult } from "../application/extraction-golden-path.ts";
+import {
+  EvidenceObjectIngestionService,
+  type EvidenceObjectIngestionInput,
+} from "../application/evidence-object-ingestion.ts";
 import {
   EYE_EXAM_EXTRACTION_SPEC,
   StoredEvidenceExtractionService,
@@ -42,8 +48,13 @@ const PUBLIC_FILES = new Map([
 const INDEX_FILE = fileURLToPath(new URL("./public/index.html", import.meta.url));
 const TESSERACT_MANIFEST_FILE = fileURLToPath(new URL("../../models/tesseract-eng-v1.manifest.json", import.meta.url));
 const EXTRACTION_PATH = "/api/employee/extraction/exam-report";
+const UPLOAD_PATH = "/api/employee/evidence-objects";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
+const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024 + 1024 * 1024;
+const MAX_UPLOAD_HEADER_BYTES = 16 * 1024;
+const MAX_UPLOAD_BOUNDARY_BYTES = 70;
 const DEFAULT_BODY_TIMEOUT_MS = 5_000;
+const DEFAULT_UPLOAD_BODY_TIMEOUT_MS = 60_000;
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000;
 const BODY_KEYS = [
   "artifactId", "attachedAt", "createdAt", "evaluatedAt", "expectationId", "factCardId",
@@ -59,6 +70,8 @@ export function createPreviewServer(options: {
   clinicalBackend?: ClinicalPreviewBackend;
   extractionBodyTimeoutMs?: number;
   extractionOperationTimeoutMs?: number;
+  uploadBodyTimeoutMs?: number;
+  evidenceObjectIngestion?: EvidenceObjectIngestionService;
 } = {}) {
   const employeeContext = options.employeeContext ?? {
     clinicId: "demo-clinic",
@@ -78,6 +91,7 @@ export function createPreviewServer(options: {
   const clock = options.clock ?? (() => new Date().toISOString());
   const bodyTimeoutMs = boundedTimeout(options.extractionBodyTimeoutMs, DEFAULT_BODY_TIMEOUT_MS);
   const operationTimeoutMs = boundedTimeout(options.extractionOperationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
+  const uploadBodyTimeoutMs = boundedTimeout(options.uploadBodyTimeoutMs, DEFAULT_UPLOAD_BODY_TIMEOUT_MS);
 
   return createServer(async (request, response) => {
     try {
@@ -91,6 +105,8 @@ export function createPreviewServer(options: {
         options.clinicalBackend,
         bodyTimeoutMs,
         operationTimeoutMs,
+        uploadBodyTimeoutMs,
+        options.evidenceObjectIngestion,
       );
     } catch (error) {
       if (error instanceof DomainError) {
@@ -149,7 +165,10 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
     goldenPath: persistedPath,
   });
   const server = createPreviewServer({
-    clinicalBackend: new PostgresClinicalPreviewBackend(pool, { extractionGoldenPath: extractionPath }),
+    clinicalBackend: new PostgresClinicalPreviewBackend(pool, {
+      extractionGoldenPath: extractionPath,
+      objectIngestion: new EvidenceObjectIngestionService(objects),
+    }),
   });
   server.once("close", () => { void pool.close(); });
   return server;
@@ -174,6 +193,8 @@ async function route(
   clinicalBackend?: ClinicalPreviewBackend,
   bodyTimeoutMs = DEFAULT_BODY_TIMEOUT_MS,
   operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS,
+  uploadBodyTimeoutMs = DEFAULT_UPLOAD_BODY_TIMEOUT_MS,
+  evidenceObjectIngestion?: EvidenceObjectIngestionService,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -191,6 +212,25 @@ async function route(
       clinicalBackend,
       bodyTimeoutMs,
       operationTimeoutMs,
+    );
+    return;
+  }
+  if (path === UPLOAD_PATH) {
+    if (method !== "POST") {
+      sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
+      return;
+    }
+    if (url.search) {
+      await handleUploadError(response, new DomainError("INVALID_UPLOAD", "Upload request is invalid."));
+      return;
+    }
+    await handleEvidenceObjectUpload(
+      request,
+      response,
+      employeeContext,
+      clinicalBackend,
+      uploadBodyTimeoutMs,
+      evidenceObjectIngestion,
     );
     return;
   }
@@ -380,6 +420,278 @@ async function handleExamReportExtraction(
   } catch (error) {
     const mapped = mapExtractionError(error);
     if (!response.writableEnded && !response.destroyed) sendJson(response, mapped.status, mapped.body);
+  }
+}
+
+async function handleEvidenceObjectUpload(
+  request: IncomingMessage,
+  response: ServerResponse,
+  employeeContext: ActorContext,
+  clinicalBackend: ClinicalPreviewBackend | undefined,
+  bodyTimeoutMs: number,
+  directIngestion?: EvidenceObjectIngestionService,
+): Promise<void> {
+  let staging: StagedUpload | undefined;
+  try {
+    assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
+    const contentType = requireMultipartContentType(request.headers["content-type"]);
+    const idempotencyKey = requireIdempotencyKey(request.headers["idempotency-key"]);
+    const ingestion = directIngestion ?? (clinicalBackend?.uploadEvidenceObject
+      ? { ingest: (context: ActorContext, input: EvidenceObjectIngestionInput) => clinicalBackend.uploadEvidenceObject!(context, input) }
+      : undefined);
+    if (!ingestion) throw new DomainError("PERSISTED_UPLOAD_UNAVAILABLE", "Persisted evidence upload is not configured.");
+    staging = await stageUpload(request, bodyTimeoutMs);
+    if (request.aborted) throw new DomainError("UPLOAD_TIMEOUT", "Upload request was interrupted.");
+    const parsed = parseMultipart(staging.bytes, contentType.boundary);
+    const ref = await ingestion.ingest(employeeContext, {
+      idempotencyKey,
+      mediaType: parsed.mediaType,
+      bytes: parsed.bytes,
+    });
+    const publicRef = safePublicObjectRef(ref);
+    const cleanupError = await cleanupUpload(staging);
+    staging = undefined;
+    if (cleanupError) throw cleanupError;
+    sendJson(response, 201, {
+      status: "STORED",
+      objectRef: {
+        objectId: publicRef.objectId,
+        contentSha256: publicRef.contentSha256,
+        sizeBytes: publicRef.sizeBytes,
+        mediaType: publicRef.mediaType,
+      },
+    });
+  } catch (error) {
+    if (staging) {
+      const cleanupError = await cleanupUpload(staging);
+      if (cleanupError) error = cleanupError;
+    }
+    const mapped = mapUploadError(error);
+    if (!response.writableEnded && !response.destroyed) sendJson(response, mapped.status, mapped.body);
+  }
+}
+
+async function handleUploadError(response: ServerResponse, error: unknown): Promise<void> {
+  const mapped = mapUploadError(error);
+  if (!response.writableEnded && !response.destroyed) sendJson(response, mapped.status, mapped.body);
+}
+
+type StagedUpload = { directory: string; file: string; bytes: Buffer };
+type MultipartContentType = { boundary: string };
+type ParsedMultipart = { mediaType: "image/png" | "image/jpeg" | "application/pdf"; bytes: Uint8Array };
+
+function requireMultipartContentType(value: string | string[] | undefined): MultipartContentType {
+  if (typeof value !== "string") throw new DomainError("UNSUPPORTED_CONTENT_TYPE", "Content-Type is not supported.");
+  const match = /^multipart\/form-data;[ \t]*boundary=(?:"([^"\\\r\n]{1,70})"|([!#$%&'*+.^_`|~0-9A-Za-z-]{1,70}))$/i.exec(value);
+  const boundary = match?.[1] ?? match?.[2];
+  if (!boundary || Buffer.byteLength(boundary, "utf8") > MAX_UPLOAD_BOUNDARY_BYTES) {
+    throw new DomainError("INVALID_UPLOAD", "Upload multipart body is invalid.");
+  }
+  return { boundary };
+}
+
+async function stageUpload(request: IncomingMessage, timeoutMs: number): Promise<StagedUpload> {
+  rejectUploadAuthorityHeaders(request);
+  const contentLength = request.headers["content-length"];
+  if (typeof contentLength === "string") {
+    if (!/^\d+$/.test(contentLength) || contentLength.length > 12) {
+      throw new DomainError("INVALID_UPLOAD", "Upload request length is invalid.");
+    }
+    const length = Number(contentLength);
+    if (!Number.isSafeInteger(length) || length > MAX_UPLOAD_BODY_BYTES) {
+      throw new DomainError("UPLOAD_TOO_LARGE", "Upload request is too large.");
+    }
+  } else if (Array.isArray(contentLength)) {
+    throw new DomainError("INVALID_UPLOAD", "Upload request length is invalid.");
+  }
+  let directory: string | undefined;
+  let file: string | undefined;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let ended = false;
+  try {
+    directory = await mkdtemp(join(tmpdir(), "clinic-os-upload-"));
+    await chmod(directory, 0o700);
+    file = join(directory, "body");
+    handle = await open(file, "wx", 0o600);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let cancelled = false;
+    let pendingWrite: Promise<unknown> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+      reject(new DomainError("UPLOAD_TIMEOUT", "Upload request timed out."));
+      }, timeoutMs);
+    });
+    const consume = (async () => {
+      for await (const chunk of request) {
+        if (cancelled) break;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += bytes.byteLength;
+        if (total > MAX_UPLOAD_BODY_BYTES) throw new DomainError("UPLOAD_TOO_LARGE", "Upload request is too large.");
+        chunks.push(bytes);
+        pendingWrite = handle!.write(bytes);
+        await pendingWrite;
+        pendingWrite = undefined;
+      }
+      if (request.aborted || request.complete === false) {
+        throw new DomainError("UPLOAD_TIMEOUT", "Upload request was interrupted.");
+      }
+      ended = true;
+    })();
+    let abortHandler: (() => void) | undefined;
+    let errorHandler: (() => void) | undefined;
+    const interruption = new Promise<never>((_, reject) => {
+      const abort = () => reject(new DomainError("UPLOAD_TIMEOUT", "Upload request was interrupted."));
+      abortHandler = abort;
+      errorHandler = abort;
+      request.once("aborted", abort);
+      request.once("error", abort);
+      consume.finally(() => {
+        request.off("aborted", abort);
+        request.off("error", abort);
+      }).catch(() => undefined);
+    });
+    try {
+      await Promise.race([consume, interruption, timeout]);
+    } catch (error) {
+      if (timer) clearTimeout(timer);
+      cancelled = true;
+      request.resume();
+      await pendingWrite?.catch(() => undefined);
+      consume.catch(() => undefined);
+      throw error;
+    }
+    if (timer) clearTimeout(timer);
+    if (abortHandler) request.off("aborted", abortHandler);
+    if (errorHandler) request.off("error", errorHandler);
+    return { directory, file, bytes: Buffer.concat(chunks, total) };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (directory) {
+      try {
+        await rm(directory, { recursive: true, force: false });
+      } catch {
+        throw new DomainError("UPLOAD_CLEANUP_FAILED", "Upload cleanup failed.");
+      }
+    }
+    throw error instanceof DomainError ? error : new DomainError("INTERNAL_UPLOAD_ERROR", "Upload failed.");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function rejectUploadAuthorityHeaders(request: IncomingMessage): void {
+  const authorityHeaders = [
+    "x-clinic-id", "x-actor-id", "x-role", "x-source-employee-id", "x-object-id",
+    "x-content-sha256", "x-size-bytes", "x-media-type", "x-object-ref", "x-provider",
+    "x-filesystem-path", "x-artifact-id", "x-fact-card-id", "x-workflow-id", "x-expectation-id",
+  ];
+  if (authorityHeaders.some((name) => request.headers[name] !== undefined)) {
+    throw new DomainError("INVALID_UPLOAD", "Upload request is invalid.");
+  }
+}
+
+function parseMultipart(body: Buffer, boundary: string): ParsedMultipart {
+  const opening = Buffer.from(`--${boundary}\r\n`, "ascii");
+  if (!body.subarray(0, opening.length).equals(opening)) throw invalidUpload();
+  const headerStart = opening.length;
+  const headerEnd = body.indexOf(Buffer.from("\r\n\r\n", "ascii"), headerStart);
+  if (headerEnd < 0 || headerEnd - headerStart > MAX_UPLOAD_HEADER_BYTES) throw invalidUpload();
+  const headers = parsePartHeaders(body.subarray(headerStart, headerEnd).toString("latin1"));
+  const dataStart = headerEnd + 4;
+  const marker = Buffer.from(`\r\n--${boundary}`, "ascii");
+  let markerAt = body.indexOf(marker, dataStart);
+  while (markerAt >= 0) {
+    const suffix = markerAt + marker.length;
+    if (body.subarray(suffix, suffix + 2).equals(Buffer.from("--", "ascii"))) {
+      const end = suffix + 2;
+      if (end !== body.length && !body.subarray(end, end + 2).equals(Buffer.from("\r\n", "ascii"))) throw invalidUpload();
+      if (end + 2 !== body.length) throw invalidUpload();
+      const bytes = body.subarray(dataStart, markerAt);
+      return validateUploadedPart(headers, bytes);
+    }
+    if (body.subarray(suffix, suffix + 2).equals(Buffer.from("\r\n", "ascii"))) throw invalidUpload();
+    markerAt = body.indexOf(marker, markerAt + 1);
+  }
+  throw invalidUpload();
+}
+
+function parsePartHeaders(text: string): { filename: string; mediaType: ParsedMultipart["mediaType"] } {
+  const lines = text.split("\r\n");
+  if (lines.length !== 2 || lines.some((line) => line.length === 0 || /[^\x20-\x7e]/.test(line))) throw invalidUpload();
+  const disposition = /^Content-Disposition: form-data; name="file"; filename="([^"\r\n]{1,255})"$/i.exec(lines[0]);
+  const type = /^Content-Type: ([^\r\n]+)$/i.exec(lines[1]);
+  if (!disposition || !type) throw invalidUpload();
+  const mediaType = type[1].toLowerCase();
+  if (!(mediaType === "image/png" || mediaType === "image/jpeg" || mediaType === "application/pdf")) {
+    throw new DomainError("UNSUPPORTED_CONTENT_TYPE", "Evidence media type is not supported.");
+  }
+  const filename = disposition[1];
+  if (filename.includes("/") || filename.includes("\\") || /[\x00-\x1f\x7f]/.test(filename) || filename === "." || filename === "..") throw invalidUpload();
+  return { filename, mediaType: mediaType as ParsedMultipart["mediaType"] };
+}
+
+function validateUploadedPart(headers: { filename: string; mediaType: ParsedMultipart["mediaType"] }, bytes: Buffer): ParsedMultipart {
+  if (bytes.length < 1 || bytes.length > 25 * 1024 * 1024) throw new DomainError("UPLOAD_TOO_LARGE", "Upload file is too large.");
+  const signatures: Record<ParsedMultipart["mediaType"], Buffer> = {
+    "image/png": Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    "image/jpeg": Buffer.from([255, 216, 255]),
+    "application/pdf": Buffer.from("%PDF-", "ascii"),
+  };
+  if (!bytes.subarray(0, signatures[headers.mediaType].length).equals(signatures[headers.mediaType])) throw invalidUpload();
+  return { mediaType: headers.mediaType, bytes: new Uint8Array(bytes) };
+}
+
+function invalidUpload(): DomainError {
+  return new DomainError("INVALID_UPLOAD", "Upload multipart body is invalid.");
+}
+
+async function cleanupUpload(staging: StagedUpload): Promise<DomainError | undefined> {
+  try {
+    await rm(staging.directory, { recursive: true, force: false });
+    return undefined;
+  } catch {
+    return new DomainError("UPLOAD_CLEANUP_FAILED", "Upload cleanup failed.");
+  }
+}
+
+function mapUploadError(error: unknown): { status: number; body: { error: string; message: string } } {
+  const code = error instanceof DomainError ? error.code : "INTERNAL_UPLOAD_ERROR";
+  if (code === "PERSISTED_UPLOAD_UNAVAILABLE") return publicError(503, code, "Persisted evidence upload is unavailable.");
+  if (code === "FORBIDDEN" || code === "ROLE_SCOPE_VIOLATION" || code === "TENANT_SCOPE_VIOLATION" || code === "INVALID_ACTOR_CONTEXT") return publicError(403, "FORBIDDEN", "The request is not permitted.");
+  if (code === "INVALID_IDEMPOTENCY_KEY") return publicError(400, code, "Idempotency-Key is invalid.");
+  if (code === "UNSUPPORTED_CONTENT_TYPE") return publicError(415, code, "Content-Type is not supported.");
+  if (code === "UPLOAD_TOO_LARGE" || code === "OBJECT_TOO_LARGE") return publicError(413, "UPLOAD_TOO_LARGE", "Upload is too large.");
+  if (code === "UPLOAD_TIMEOUT") return publicError(408, code, "Upload timed out; retry the exact request.");
+  if (code === "OBJECT_ID_CONFLICT") return publicError(409, "UPLOAD_CONFLICT", "Upload conflicts with an existing object.");
+  if (["OBJECT_STORE_PROVIDER_FAILED", "OBJECT_STORE_IO_FAILED", "INVALID_OBJECT_STORE_RESPONSE", "UPLOAD_CLEANUP_FAILED"].includes(code)) return publicError(503, "UPLOAD_UNAVAILABLE", "Evidence storage is unavailable.");
+  if (["INVALID_UPLOAD", "INVALID_OBJECT_INGESTION_INPUT", "INVALID_OBJECT_BYTES"].includes(code)) return publicError(400, "INVALID_UPLOAD", "Upload request is invalid.");
+  return publicError(500, "INTERNAL_UPLOAD_ERROR", "Unexpected upload error.");
+}
+
+function safePublicObjectRef(value: unknown): {
+  objectId: string;
+  contentSha256: string;
+  sizeBytes: number;
+  mediaType: "image/png" | "image/jpeg" | "application/pdf";
+} {
+  try {
+    const ref = structuredClone(value) as Record<string, unknown>;
+    if (!ref || typeof ref !== "object" || Array.isArray(ref) || Object.keys(ref).length !== 5 ||
+        typeof ref.clinicId !== "string" || typeof ref.objectId !== "string" ||
+        !/^upload-[a-f0-9]{64}$/.test(ref.objectId) || typeof ref.contentSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(ref.contentSha256) || typeof ref.sizeBytes !== "number" ||
+        !Number.isSafeInteger(ref.sizeBytes) || ref.sizeBytes <= 0 || ref.sizeBytes > 25 * 1024 * 1024 ||
+        typeof ref.mediaType !== "string" || !["image/png", "image/jpeg", "application/pdf"].includes(ref.mediaType)) throw new Error();
+    return {
+      objectId: ref.objectId as string,
+      contentSha256: ref.contentSha256 as string,
+      sizeBytes: ref.sizeBytes as number,
+      mediaType: ref.mediaType as "image/png" | "image/jpeg" | "application/pdf",
+    };
+  } catch {
+    throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Evidence object storage returned an invalid reference.");
   }
 }
 
