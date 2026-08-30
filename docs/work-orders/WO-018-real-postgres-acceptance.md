@@ -125,3 +125,18 @@ Implement only this acceptance harness/runbook, commit `test(postgres): add real
 - ordinary regression result;
 - local fail-closed result;
 - real-server result as `NOT RUN` unless actually executed.
+
+## 10. Architecture review — 2026-08-30
+
+**Status:** `IMPLEMENTED / ENVIRONMENT GATE OPEN`
+
+- Ordinary regression: 250/250 passed.
+- Destructive-safety unit tests: 6/6 passed.
+- Domain and runtime demos: passed.
+- Local gate behavior: controlled non-zero `ENVIRONMENT_REQUIRED`.
+- Independent review: passed after destructive confirmation, database identity, RLS,
+  transactional cleanup, signal cancellation and binary timeout hardening.
+- Real PostgreSQL 16/17 execution: `NOT RUN` in the current executor.
+
+This status accepts the harness implementation only. WO-018 becomes `ACCEPTED` only after
+`npm run accept:postgres-real` completes with `[WO018][PASS]` on a qualifying real server.
