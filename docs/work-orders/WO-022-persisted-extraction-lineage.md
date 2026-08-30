@@ -1,6 +1,6 @@
 # WO-022 — Persisted Stored-Evidence and Extraction Lineage
 
-**Status:** Architecture frozen / Builder ready  
+**Status:** Accepted — Architecture Review passed 2026-08-30  
 **Depends on:** Constitution, WO-007, WO-008, WO-019, WO-020, WO-021
 
 ## 1. Goal
@@ -119,3 +119,16 @@ repository/shared validation changes and tests. Add no dependency or ORM. Run ta
 both demos, local OCR acceptance and the local real-PostgreSQL fail-closed check. Commit as
 `feat(persistence): persist extraction lineage`, report exact files/schema/tests/deviations, and do
 not push before independent Architecture Review.
+
+## 8. Architecture acceptance
+
+Accepted after Builder commits `da9dec7` and `3f51209`, followed by an independent review.
+
+- Full regression: 308/308.
+- Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present in this environment.
+- Review blockers fixed: exact single-source extraction lineage and inert pre-acquisition input
+  snapshotting for getters, proxies, symbols and hostile prototypes.
+- No HTTP/UI/ORM/queue scope added; GitHub push remains deferred for the batch release.
