@@ -1,6 +1,6 @@
 # WO-015 — Restartable Persisted Golden Path Orchestration
 
-**Status:** FROZEN
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -135,3 +135,17 @@ git diff --check
 ## 10. Builder handoff
 
 The Builder must read the Constitution and WO-008 through WO-015, implement only this application slice, run all acceptance commands, commit as `feat(application): orchestrate persisted golden path`, report exact files/tests/deviations, and not push before Architecture Review.
+
+## 11. Architecture acceptance
+
+Accepted on 2026-08-30 through `0b3d33e` after independent review.
+
+- 226/226 tests and both demos pass.
+- Trigger and consequence commands coordinate only the accepted authoritative repositories, preserving their short tenant transactions and lock order.
+- Exact replay resumes failed stages without duplicate immutable rows; ambiguity and stale evaluation remain fail-visible.
+- Consequence Workflow mismatch is checked through a detached tenant read before Expectation mutation.
+- Trigger replay after later progression intentionally returns the current durable Expectation projection plus the original initialization transition lineage; this is covered by a `trigger -> consequence -> trigger replay` database test.
+- Inputs are snapshotted before asynchronous work and outputs are detached.
+- No migration, dependency, queue, worker, command bus or global-ACID claim was added.
+
+HTTP/UI persistence wiring, scheduling, real PostgreSQL application-role RLS/concurrency, backup and restore remain later acceptance gates.
