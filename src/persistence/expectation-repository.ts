@@ -96,6 +96,23 @@ export class ExpectationRepository {
     this.#pool = pool;
   }
 
+  async getExpectation(
+    context: ActorContext,
+    expectationId: string,
+  ): Promise<Expectation | null> {
+    const captured = structuredClone({ context, expectationId });
+    assertActorContext(captured.context);
+    if (typeof captured.expectationId !== "string" || captured.expectationId.trim() === "") {
+      throw new DomainError("EXPECTATION_ID_REQUIRED", "Expectation ID is required.");
+    }
+    return withTenantTransaction(this.#pool, captured.context.clinicId, async (client) =>
+      structuredClone(await findExpectation(
+        client,
+        captured.context.clinicId,
+        captured.expectationId,
+      )));
+  }
+
   async initializeExpectation(
     context: ActorContext,
     workflowId: string,

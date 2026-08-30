@@ -53,5 +53,9 @@ Workflow/Expectation projections atomically, including append-only human VOID hi
 The PostgreSQL manager closure read model returns tenant-scoped Workflow, Expectation,
 Verification, evidence-ID and decision summaries without reading raw Artifact, FactCard,
 employee-conversation or decision-note content. Incomplete chains remain explicit review items.
+The restartable persisted golden-path application service now coordinates capture, authoritative
+attach, Expectation evaluation and S2 Verification for explicit trigger and consequence commands.
+Each repository stage remains its own short atomic transaction; replay resumes incomplete chains
+without claiming a global Artifact-to-Verification transaction.
 Preview/API persistence parity, reopen/correction flows, real PostgreSQL application-role
 RLS/concurrency proof, backup and restore remain separate acceptance gates.
