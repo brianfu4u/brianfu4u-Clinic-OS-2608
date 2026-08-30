@@ -84,3 +84,19 @@ real-PostgreSQL gate separately.
 WO-018 remains `IMPLEMENTED / ENVIRONMENT GATE OPEN` until the destructive suite passes on a
 dedicated PostgreSQL 16/17 environment. WO-031 only prevents a deployed runtime from claiming
 clinical readiness against the wrong schema; it does not prove application-role RLS or recovery.
+
+## 7. Architecture review — 2026-08-31
+
+**Status:** Accepted — Architecture Review passed
+
+- Implementation: `d5392e4` (`feat(runtime): gate readiness on schema compatibility`).
+- The local database readiness probe now invokes one read-only exact ledger comparison instead of
+  `SELECT 1`; it releases the acquired application connection in `finally`.
+- Independent attack review covered missing ledger, missing and unknown rows, checksum drift,
+  exceptions, no-write behavior and secret/error redaction. All fail closed through the existing
+  bounded `DATABASE_UNAVAILABLE` readiness result.
+- Regression: 356/356 passed. Golden-path and persisted-closure demos passed. Local OCR: 2/2.
+- `npm run accept:postgres-real` remains intentionally blocked with
+  `ENVIRONMENT_REQUIRED`; no dedicated PostgreSQL 16/17 acceptance environment is configured in
+  this workspace. WO-018 is still an external acceptance gate.
+- No GitHub push was performed.
