@@ -122,14 +122,27 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     context: ActorContext,
     command: ProcessGoldenPathCommand,
   ): Promise<ProcessGoldenPathResult> {
-    assertActorAccess(context, context.clinicId, "EMPLOYEE");
+    const capturedContext = snapshotActorContext(context);
+    const capturedCommand = structuredClone(command);
+    assertActorAccess(capturedContext, capturedContext.clinicId, "EMPLOYEE");
     if (!this.#extractionPath) {
       throw new DomainError(
         "PERSISTED_TRANSPORT_UNAVAILABLE",
         "Persisted extraction transport is not configured.",
       );
     }
-    return this.#extractionPath.processGoldenPath(context, command);
+    // The opaque Expectation ID is not authority by itself.  Its current
+    // employee-safe selection is rechecked before the extraction path can
+    // persist or attach a consequence, including at the exclusive due edge.
+    const page = await this.#openExpectations.listOpenExamReportExpectations(capturedContext, {
+      asOf: capturedCommand.operation?.evaluatedAt,
+      limit: 50,
+    });
+    const selected = page.items.some((item) => item.expectationId === capturedCommand.operation?.expectationId);
+    if (!selected && !(await this.#extractionPath.canResumeExisting(capturedContext, capturedCommand))) {
+      throw new DomainError("EXPECTATION_SELECTION_REQUIRED", "A current employee expectation selection is required.");
+    }
+    return this.#extractionPath.processGoldenPath(capturedContext, capturedCommand);
   }
 
   async createRegistrationTrigger(
@@ -286,6 +299,13 @@ function requireKey(value: unknown): asserts value is string {
   if (typeof value !== "string" || value.length < 8 || value.length > 128 || !/^[A-Za-z0-9._:+-]+$/.test(value)) {
     throw new DomainError("INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be 8-128 bounded characters.");
   }
+}
+
+function requireExpectationId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) {
+    throw new DomainError("INVALID_EXPECTATION_ID", "Expectation ID is invalid.");
+  }
+  return value;
 }
 
 function requireExactRegistrationInput(value: ClinicalRegistrationTriggerInput): void {

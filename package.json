@@ -10,6 +10,7 @@
     "test": "node --test test/*.test.ts",
     "demo": "node src/domain/golden-path.ts",
     "runtime:demo": "node src/runtime/runtime-demo.ts",
+    "demo:closure": "node scripts/persisted-closure-demo.ts",
     "preview": "node src/preview/server.ts",
     "db:migrate": "node src/persistence/node-pg-client.ts",
     "accept:postgres-real": "node --test acceptance/real-postgres.test.ts",

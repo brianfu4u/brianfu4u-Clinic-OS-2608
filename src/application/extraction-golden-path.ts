@@ -72,6 +72,26 @@ export class ExtractionGoldenPath {
     this.#goldenPath = dependencies.goldenPath;
   }
 
+  /**
+   * Narrow transport preflight for a consumed employee selection.  It never
+   * reads object bytes, invokes inference, or writes state: it merely proves
+   * that this exact employee is resuming already-durable extraction lineage.
+   */
+  async canResumeExisting(
+    context: ActorContext,
+    command: ProcessGoldenPathCommand,
+  ): Promise<boolean> {
+    const captured = snapshotInertExtractionInput({ context, command });
+    validateCommand(captured.context, captured.command);
+    const saved = await this.#persistence.getExtraction(
+      captured.context,
+      captured.command.extraction.requestId,
+    );
+    if (!saved) return false;
+    assertReplayIdentity(captured.context, captured.command.extraction, captured.command.operation, saved);
+    return true;
+  }
+
   async processGoldenPath(
     context: ActorContext,
     command: ProcessGoldenPathCommand,

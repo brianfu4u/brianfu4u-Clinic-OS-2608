@@ -87,6 +87,19 @@ The restartable persisted golden-path application service now coordinates captur
 attach, Expectation evaluation and S2 Verification for explicit trigger and consequence commands.
 Each repository stage remains its own short atomic transaction; replay resumes incomplete chains
 without claiming a global Artifact-to-Verification transaction.
+
+## Persisted closure acceptance demo
+
+Run the deterministic, non-PHI SQL-semantic closure proof with:
+
+```bash
+npm run demo:closure
+```
+
+It exercises the production registration, employee-safe selection, local object ingestion,
+stored extraction, attach/Expectation/S2 and manager-close services against fresh PGlite
+migrations. Output is deliberately limited to phase/status/count totals. It is not a real
+PostgreSQL, browser, OCR-accuracy, authentication, or clinic-readiness acceptance result.
 An explicitly supplied clinical backend now accepts one narrow durable employee command:
 `POST /api/employee/registration-trigger` with only an exact synthetic identity anchor and
 occurrence instant. The server derives all Artifact, FactCard and Expectation identities, then
