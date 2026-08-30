@@ -10,6 +10,11 @@ import {
 } from "./tesseract-ocr-provider.ts";
 import type { RuntimeManifest } from "./contracts.ts";
 import { validateRuntimeManifest } from "./manifest-validator.ts";
+import { createNodePgPool, type NodePgPool } from "../persistence/node-pg-pool.ts";
+import { InferenceGateway } from "./inference-gateway.ts";
+import { TesseractOcrProvider } from "./tesseract-ocr-provider.ts";
+import { LocalObjectStore } from "../storage/local-object-store.ts";
+import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
 
 export const CLINICAL_CAPABILITY = "EXTRACT_EYE_EXAM_REPORT" as const;
 const MANIFEST_FILE = fileURLToPath(new URL("../../models/tesseract-eng-v1.manifest.json", import.meta.url));
@@ -67,6 +72,19 @@ const ENV_NAMES = new Set([
 ]);
 const LEGACY_NAMES = new Set(["PREVIEW_OBJECT_STORE_ROOT", "LOCAL_OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT", "PREVIEW_PORT"]);
 
+/** Opaque, server-ready local adapters. No raw startup secret is returned. */
+export interface ConfiguredLocalRuntime {
+  readonly pool: NodePgPool;
+  readonly objects: ObjectStoreGateway;
+  readonly inference: InferenceGateway;
+  readonly readinessProbes: Readonly<{
+    database: () => Promise<boolean>;
+    objectStore: () => Promise<boolean>;
+    ocrManifest: () => Promise<boolean>;
+    inferenceCapability: () => Promise<boolean>;
+  }>;
+}
+
 export function validateStartupConfig(input: Record<string, unknown> = process.env): StartupConfig {
   const env = normalizeInput(input);
   rejectUnknownConfigurationNames(env);
@@ -77,29 +95,24 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
     }
     return makeSynthetic(env);
   }
-  if (previewMode !== undefined && previewMode !== "postgres") throw startupError("INVALID_PREVIEW_MODE");
-
-  // PREVIEW_MODE=postgres is an explicit migration-era compatibility parser. It is
-  // intentionally never the default and cannot override canonical names.
-  const legacy = previewMode === "postgres" && env.CLINIC_OS_PROFILE === undefined;
-  if (legacy) {
-    if (!env.DATABASE_URL?.trim()) throw startupError("DATABASE_URL_REQUIRED");
-    if (!legacyRoot(env)) throw startupError("OBJECT_STORE_ROOT_REQUIRED");
+  if (previewMode !== undefined) {
+    if (previewMode === "postgres") throw startupError("LEGACY_CONFIGURATION_NAME");
+    throw startupError("INVALID_PREVIEW_MODE");
   }
-  const profile = required(env.CLINIC_OS_PROFILE ?? (legacy ? "ON_PREM_STRICT" : undefined), "PROFILE_REQUIRED");
+  const profile = required(env.CLINIC_OS_PROFILE, "PROFILE_REQUIRED");
   const databaseUrl = required(env.DATABASE_URL, "DATABASE_URL_REQUIRED");
   validateDatabaseUrl(databaseUrl);
-  const databaseProvider = required(env.CLINIC_OS_DATABASE_PROVIDER ?? (legacy ? "LOCAL_POSTGRES" : undefined), "DATABASE_PROVIDER_REQUIRED");
-  const fileProvider = required(env.CLINIC_OS_FILE_PROVIDER ?? (legacy ? "LOCAL_OBJECT_STORE" : undefined), "FILE_PROVIDER_REQUIRED");
-  const inferenceProvider = required(env.CLINIC_OS_INFERENCE_PROVIDER ?? (legacy ? "LOCAL_MODEL" : undefined), "INFERENCE_PROVIDER_REQUIRED");
-  const backupProvider = required(env.CLINIC_OS_BACKUP_PROVIDER ?? (legacy ? "LOCAL_ENCRYPTED_BACKUP" : undefined), "BACKUP_PROVIDER_REQUIRED");
+  const databaseProvider = required(env.CLINIC_OS_DATABASE_PROVIDER, "DATABASE_PROVIDER_REQUIRED");
+  const fileProvider = required(env.CLINIC_OS_FILE_PROVIDER, "FILE_PROVIDER_REQUIRED");
+  const inferenceProvider = required(env.CLINIC_OS_INFERENCE_PROVIDER, "INFERENCE_PROVIDER_REQUIRED");
+  const backupProvider = required(env.CLINIC_OS_BACKUP_PROVIDER, "BACKUP_PROVIDER_REQUIRED");
   const externalInferenceAuthorized = exactBoolean(
     env.CLINIC_OS_EXTERNAL_INFERENCE_AUTHORIZED,
     "EXTERNAL_INFERENCE_AUTHORIZATION_REQUIRED",
-    legacy ? false : undefined,
+    undefined,
   );
   const manifestVersion = boundedToken(
-    env.CLINIC_OS_MANIFEST_VERSION ?? (legacy ? "preview-postgres-local-v1" : undefined),
+    env.CLINIC_OS_MANIFEST_VERSION,
     "MANIFEST_VERSION_REQUIRED",
   );
   const manifest = validateRuntimeManifest({
@@ -114,15 +127,15 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
   if (manifest.profile === "ON_PREM_STRICT" && manifest.inferenceProvider !== "LOCAL_MODEL") {
     throw startupError("STRICT_LOCAL_INFERENCE_REQUIRED");
   }
-  const rootValue = env.CLINIC_OS_OBJECT_STORE_ROOT ?? (legacy ? legacyRoot(env) : undefined);
+  const rootValue = env.CLINIC_OS_OBJECT_STORE_ROOT;
   const objectStoreRoot = isLocalFileProvider(manifest.fileProvider)
-    ? requiredAbsolutePath(rootValue, legacy ? "OBJECT_STORE_ROOT_REQUIRED" : "OBJECT_STORE_ROOT_REQUIRED")
+    ? requiredAbsolutePath(rootValue, "OBJECT_STORE_ROOT_REQUIRED")
     : undefined;
   if (!isLocalFileProvider(manifest.fileProvider) && rootValue !== undefined) {
     throw startupError("LOCAL_PATH_FORBIDDEN");
   }
 
-  const capabilities = parseCapabilities(env.CLINIC_OS_INFERENCE_CAPABILITIES, manifest.inferenceProvider, legacy);
+  const capabilities = parseCapabilities(env.CLINIC_OS_INFERENCE_CAPABILITIES, manifest.inferenceProvider);
   let tesseractPath: string | undefined;
   let tessdataDir: string | undefined;
   const needsLocalOcr = manifest.inferenceProvider === "LOCAL_MODEL";
@@ -171,10 +184,46 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
   return config;
 }
 
-export function getStartupPrivateValues(config: StartupConfig): Readonly<PrivateStartupValues> {
+/**
+ * Builds only the supported local runtime assembly. Values stay in this module's
+ * private WeakMap; callers receive usable adapters, never URLs, paths or endpoints.
+ */
+export function createConfiguredLocalRuntime(config: StartupConfig): ConfiguredLocalRuntime | null {
   const values = privateValues.get(config);
-  if (!values) throw startupError("INVALID_STARTUP_CONFIG");
-  return values;
+  if (!values || config.mode !== "CONFIGURED" || !config.manifest) throw startupError("INVALID_STARTUP_CONFIG");
+  const manifest = config.manifest;
+  if (manifest.profile === "CLOUD" || manifest.inferenceProvider !== "LOCAL_MODEL") return null;
+  if (!values.databaseUrl || !values.objectStoreRoot || !values.tesseractPath || !values.tessdataDir) {
+    throw startupError("INVALID_STARTUP_CONFIG");
+  }
+  const pool = createNodePgPool(values.databaseUrl);
+  const objects = new ObjectStoreGateway(manifest, new LocalObjectStore(values.objectStoreRoot));
+  const inference = new InferenceGateway(manifest, new TesseractOcrProvider({
+    executablePath: values.tesseractPath,
+    tessdataDir: values.tessdataDir,
+  }));
+  return Object.freeze({
+    pool,
+    objects,
+    inference,
+    readinessProbes: Object.freeze({
+      database: async () => {
+        const connection = await pool.connect();
+        try { await connection.query("SELECT 1"); return true; } finally { connection.release(); }
+      },
+      objectStore: async () => {
+        const { access } = await import("node:fs/promises");
+        await access(values.objectStoreRoot!);
+        return true;
+      },
+      ocrManifest: async () => {
+        validateTesseractCheckedInManifestSync(MANIFEST_FILE);
+        validateTesseractAssetPathChainSync({ executablePath: values.tesseractPath!, tessdataDir: values.tessdataDir! });
+        return true;
+      },
+      inferenceCapability: async () => true,
+    }),
+  });
 }
 
 function makeSynthetic(env: Record<string, string | undefined>): StartupConfig {
@@ -247,14 +296,7 @@ function rejectUnknownConfigurationNames(env: Record<string, string | undefined>
     }
   }
   const aliases = Object.keys(env).filter((key) => LEGACY_NAMES.has(key) && env[key] !== undefined);
-  if (aliases.length > 0 && env.PREVIEW_MODE !== "postgres") throw startupError("LEGACY_CONFIGURATION_NAME");
-  if (env.PREVIEW_PORT !== undefined) throw startupError("LEGACY_CONFIGURATION_NAME");
-  if (aliases.length > 1) throw startupError("LEGACY_CONFIGURATION_NAME");
-  if (aliases.length === 1 && env.CLINIC_OS_OBJECT_STORE_ROOT !== undefined) throw startupError("LEGACY_CONFIGURATION_NAME");
-}
-
-function legacyRoot(env: Record<string, string | undefined>): string | undefined {
-  return env.PREVIEW_OBJECT_STORE_ROOT ?? env.LOCAL_OBJECT_STORE_ROOT ?? env.OBJECT_STORE_ROOT;
+  if (aliases.length > 0) throw startupError("LEGACY_CONFIGURATION_NAME");
 }
 
 function required(value: string | undefined, code: string): string {
@@ -274,9 +316,9 @@ function exactBoolean(value: string | undefined, code: string, fallback?: boolea
   return value === "true";
 }
 
-function parseCapabilities(value: string | undefined, provider: RuntimeManifest["inferenceProvider"], legacy: boolean): string[] {
+function parseCapabilities(value: string | undefined, provider: RuntimeManifest["inferenceProvider"]): string[] {
   if (provider === "DISABLED" && value === undefined) return [];
-  const raw = required(value ?? (legacy ? CLINICAL_CAPABILITY : undefined), "INFERENCE_CAPABILITIES_REQUIRED");
+  const raw = required(value, "INFERENCE_CAPABILITIES_REQUIRED");
   const values = raw.split(",").map((part) => part.trim());
   if (values.length === 0 || values.some((part) => part !== CLINICAL_CAPABILITY) || new Set(values).size !== values.length) {
     throw startupError("INFERENCE_CAPABILITIES_INVALID");

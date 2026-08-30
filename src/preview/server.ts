@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
-import { access, chmod, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -23,24 +23,14 @@ import { CaptureRepository } from "../persistence/capture-repository.ts";
 import { ExpectationRepository } from "../persistence/expectation-repository.ts";
 import { VerificationRepository } from "../persistence/verification-repository.ts";
 import { WorkflowAttachRepository } from "../persistence/workflow-attach-repository.ts";
-import { createNodePgPool } from "../persistence/node-pg-pool.ts";
 import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
-import { InferenceGateway } from "../runtime/inference-gateway.ts";
-import type { RuntimeManifest } from "../runtime/contracts.ts";
 import {
-  getStartupPrivateValues,
+  createConfiguredLocalRuntime,
   LOCAL_OCR_STARTUP_SPEC,
   validateStartupConfig,
   type StartupConfig,
 } from "../runtime/startup-config.ts";
 import { StartupReadiness } from "../runtime/readiness.ts";
-import {
-  TesseractOcrProvider,
-  validateTesseractAssetPathChainSync,
-  validateTesseractCheckedInManifestSync,
-} from "../runtime/tesseract-ocr-provider.ts";
-import { LocalObjectStore } from "../storage/local-object-store.ts";
-import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
 import { PreviewStore, type EmployeeStatus } from "./preview-store.ts";
 import type { ClinicalPreviewBackend } from "./clinical-preview-backend.ts";
 import { PostgresClinicalPreviewBackend, requireIdempotencyKey } from "./clinical-preview-backend.ts";
@@ -50,7 +40,6 @@ const PUBLIC_FILES = new Map([
   ["/app.js", { file: "public/app.js", type: "text/javascript; charset=utf-8" }],
 ]);
 const INDEX_FILE = fileURLToPath(new URL("./public/index.html", import.meta.url));
-const TESSERACT_MANIFEST_FILE = fileURLToPath(new URL("../../models/tesseract-eng-v1.manifest.json", import.meta.url));
 const EXTRACTION_PATH = "/api/employee/extraction/exam-report";
 const UPLOAD_PATH = "/api/employee/evidence-objects";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
@@ -131,24 +120,15 @@ export function createPreviewServer(options: {
 export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.env) {
   const startupConfig = validateStartupConfig(env);
   if (startupConfig.mode === "SYNTHETIC_PREVIEW") return createPreviewServer({ startupConfig });
-  const manifest = startupConfig.manifest!;
-  const privateValues = getStartupPrivateValues(startupConfig);
   // Cloud and non-local-inference declarations are valid configuration snapshots,
   // but this ticket deliberately has no cloud/private adapters to construct.
-  if (manifest.profile === "CLOUD" || manifest.inferenceProvider !== "LOCAL_MODEL") {
-    return createPreviewServer({ startupConfig, readiness: new StartupReadiness(startupConfig) });
-  }
-  const pool = createNodePgPool(privateValues.databaseUrl!);
-  const runtime: RuntimeManifest = manifest;
+  const localRuntime = createConfiguredLocalRuntime(startupConfig);
+  if (!localRuntime) return createPreviewServer({ startupConfig, readiness: new StartupReadiness(startupConfig) });
+  const { pool, objects, inference, readinessProbes } = localRuntime;
   const spec = {
     ...EYE_EXAM_EXTRACTION_SPEC,
     ...LOCAL_OCR_STARTUP_SPEC,
   } as const;
-  const objects = new ObjectStoreGateway(runtime, new LocalObjectStore(privateValues.objectStoreRoot!));
-  const inference = new InferenceGateway(runtime, new TesseractOcrProvider({
-    executablePath: privateValues.tesseractPath!,
-    tessdataDir: privateValues.tessdataDir!,
-  }));
   const capture = new CaptureRepository(pool);
   const persistedPath = new PersistedGoldenPath({
     capture,
@@ -163,19 +143,7 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   });
   const server = createPreviewServer({
     startupConfig,
-    readiness: new StartupReadiness(startupConfig, {
-      database: async () => {
-        const connection = await pool.connect();
-        try { await connection.query("SELECT 1"); return true; } finally { connection.release(); }
-      },
-      objectStore: async () => { await access(privateValues.objectStoreRoot!); return true; },
-      ocrManifest: async () => {
-        validateTesseractCheckedInManifestSync(TESSERACT_MANIFEST_FILE);
-        validateTesseractAssetPathChainSync({ executablePath: privateValues.tesseractPath!, tessdataDir: privateValues.tessdataDir! });
-        return true;
-      },
-      inferenceCapability: async () => true,
-    }),
+    readiness: new StartupReadiness(startupConfig, readinessProbes),
     clinicalBackend: new PostgresClinicalPreviewBackend(pool, {
       extractionGoldenPath: extractionPath,
       objectIngestion: new EvidenceObjectIngestionService(objects),

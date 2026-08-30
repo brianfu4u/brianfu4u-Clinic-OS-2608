@@ -275,32 +275,19 @@ test("formal validation and idempotency fail before acquisition; DB failure appe
   });
 });
 
-test("explicit postgres startup profile requires configuration and never falls back", () => {
+test("legacy postgres preview and root aliases are rejected without fallback", () => {
   assert.throws(
     () => createConfiguredPreviewServer({ PREVIEW_MODE: "postgres" }),
-    /DATABASE_URL_REQUIRED/,
+    /LEGACY_CONFIGURATION_NAME/,
   );
   assert.throws(
     () => createConfiguredPreviewServer({ PREVIEW_MODE: "postgres", DATABASE_URL: "postgresql://localhost/clinic" }),
-    /OBJECT_STORE_ROOT_REQUIRED/,
+    /LEGACY_CONFIGURATION_NAME/,
   );
   assert.throws(
     () => createConfiguredPreviewServer({
-      PREVIEW_MODE: "postgres",
-      DATABASE_URL: "postgresql://localhost/clinic",
       PREVIEW_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
-    }),
-    /TESSERACT_PATH_REQUIRED/,
-  );
-  assert.throws(
-    () => createConfiguredPreviewServer({
-      PREVIEW_MODE: "postgres",
-      DATABASE_URL: "postgresql://localhost/clinic",
-      PREVIEW_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
-      WO021_TESSERACT_PATH: "relative/tesseract",
-      WO021_TESSDATA_DIR: "/var/lib/clinic-os/tessdata",
-    }),
-    /TESSERACT_PATH_REQUIRED:INVALID_ABSOLUTE_PATH/,
+    }), /LEGACY_CONFIGURATION_NAME/,
   );
   assert.throws(
     () => createConfiguredPreviewServer({ PREVIEW_MODE: "unknown" }),
@@ -308,11 +295,18 @@ test("explicit postgres startup profile requires configuration and never falls b
   );
 });
 
-test("configured postgres startup validates all frozen OCR assets before creating the pool", async (t) => {
+test("configured startup validates all frozen OCR assets before creating the pool", async (t) => {
   const env = {
-    PREVIEW_MODE: "postgres",
+    CLINIC_OS_PROFILE: "ON_PREM_STRICT",
     DATABASE_URL: "postgresql://localhost/clinic",
-    PREVIEW_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
+    CLINIC_OS_DATABASE_PROVIDER: "LOCAL_POSTGRES",
+    CLINIC_OS_FILE_PROVIDER: "LOCAL_OBJECT_STORE",
+    CLINIC_OS_INFERENCE_PROVIDER: "LOCAL_MODEL",
+    CLINIC_OS_BACKUP_PROVIDER: "LOCAL_ENCRYPTED_BACKUP",
+    CLINIC_OS_EXTERNAL_INFERENCE_AUTHORIZED: "false",
+    CLINIC_OS_MANIFEST_VERSION: "test-v1",
+    CLINIC_OS_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
+    CLINIC_OS_INFERENCE_CAPABILITIES: "EXTRACT_EYE_EXAM_REPORT",
     WO021_TESSERACT_PATH: "/var/lib/clinic-os/tesseract",
     WO021_TESSDATA_DIR: "/var/lib/clinic-os/tessdata",
   };

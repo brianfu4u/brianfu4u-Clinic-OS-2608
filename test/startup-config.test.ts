@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DomainError } from "../src/domain/errors.ts";
-import { getStartupPrivateValues, validateStartupConfig } from "../src/runtime/startup-config.ts";
+import * as startupConfig from "../src/runtime/startup-config.ts";
+import { createConfiguredLocalRuntime, validateStartupConfig } from "../src/runtime/startup-config.ts";
 
 const cloud = (overrides: Record<string, string> = {}) => ({
   CLINIC_OS_PROFILE: "CLOUD",
@@ -38,7 +39,12 @@ test("cloud declaration validates but never exposes secret endpoint or URL", () 
   assert.equal(config.snapshot.profile, "CLOUD");
   assert.equal(JSON.stringify(config).includes("private.example"), false);
   assert.equal(JSON.stringify(config).includes("postgresql"), false);
-  assert.equal(Object.keys(getStartupPrivateValues(config)).includes("databaseUrl"), true);
+  assert.equal("getStartupPrivateValues" in startupConfig, false);
+  assert.equal(createConfiguredLocalRuntime(config), null);
+  assert.throws(
+    () => createConfiguredLocalRuntime({ ...config } as never),
+    (error) => error instanceof DomainError && error.code === "INVALID_STARTUP_CONFIG",
+  );
 });
 
 test("private inference requires exact authorization and complete metadata", () => {

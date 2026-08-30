@@ -49,9 +49,9 @@ extraction route is therefore never advertised by a server that only has a datab
 dependency gate; it returns bounded stable codes and `503` until every selected adapter is ready.
 Cloud declarations are validated but deliberately return `CLOUD_PROVIDER_UNAVAILABLE` in this
 repository: cloud providers have not yet been implemented. No URL, credential, endpoint, or local
-path is included in either response. Legacy `PREVIEW_MODE=postgres` and its old object-root names
-are accepted only as an explicit temporary compatibility path; they never fill a missing canonical
-setting. See [WO-027](docs/work-orders/WO-027-startup-profile-readiness.md).
+path is included in either response. Legacy `PREVIEW_MODE=postgres` and old object-root names are
+rejected with `LEGACY_CONFIGURATION_NAME`; only the canonical settings above configure deployment.
+See [WO-027](docs/work-orders/WO-027-startup-profile-readiness.md).
 
 ## PostgreSQL acceptance boundary
 
