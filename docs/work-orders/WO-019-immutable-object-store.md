@@ -102,3 +102,18 @@ Read the Constitution and WO-006 before implementation. Keep the provider contra
 the filesystem API, implement only the files above, run the full test suite and both demos, commit
 as `feat(storage): add immutable evidence object store`, report exact files/tests/deviations, and
 do not push GitHub before Architecture Review.
+
+## 8. Architecture review — 2026-08-30
+
+**Status:** Accepted
+
+- Object-store tests: 22/22 passed.
+- Full regression: 272/272 passed.
+- Domain and runtime demos: passed.
+- Dependencies, database migrations, UI and OCR changes: none.
+- Independent security review: passed after provider-error sanitization, stable error preservation,
+  bounded response validation, directory ownership/permission hardening and directory-identity
+  race protection.
+
+The accepted scope is the immutable provider boundary and local filesystem implementation only.
+Artifact reference persistence, upload transport, OCR and a real cloud provider remain later work.
