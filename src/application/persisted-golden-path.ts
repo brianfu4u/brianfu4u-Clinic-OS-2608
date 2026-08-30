@@ -72,12 +72,19 @@ export interface ConsequenceCommand {
   evaluatedAt: string;
 }
 
+/**
+ * Trigger replay returns the current durable Expectation projection together with
+ * the original immutable initialization transition that established its lineage.
+ * The projection may therefore be MET while the initialization transition remains OPEN.
+ */
+export type TriggerExpectationStage = InitializedExpectation;
+
 export type PersistedTriggerResult =
   | {
       status: "COMPLETED";
       capture: SavedCapture;
       attachment: WorkflowAttachResult & { workflow: NonNullable<WorkflowAttachResult["workflow"]> };
-      expectation: InitializedExpectation;
+      expectation: TriggerExpectationStage;
       verification: PersistedVerification;
     }
   | ReviewRequiredResult;

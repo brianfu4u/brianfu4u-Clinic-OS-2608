@@ -286,6 +286,26 @@ test("exact consequence replay is idempotent", async () => {
   } finally { await pool.close(); }
 });
 
+test("trigger replay after consequence returns current projection and original initialization lineage", async () => {
+  const pool = new PGlitePoolShim(); await pool.migrate();
+  try {
+    const app = service(pool);
+    await app.recordTrigger(actor(), triggerCommand());
+    await app.recordConsequence(actor(), consequenceCommand());
+    const before = await counts(pool);
+
+    const replay = await app.recordTrigger(actor(), triggerCommand());
+
+    assert.equal(replay.status, "COMPLETED");
+    assert.equal(replay.expectation.expectation.state, "MET");
+    assert.equal(replay.expectation.expectation.satisfiedByArtifactId, "result-a");
+    assert.equal(replay.expectation.transition.fromState, null);
+    assert.equal(replay.expectation.transition.toState, "OPEN");
+    assert.equal(replay.expectation.transition.id, "transition:init:clinic-a:expectation-a");
+    assert.deepEqual(await counts(pool), before);
+  } finally { await pool.close(); }
+});
+
 test("Workflow mismatch fails before Expectation mutation or Verification", async () => {
   const pool = new PGlitePoolShim(); await pool.migrate();
   try {
