@@ -12,6 +12,11 @@ import { DomainError } from "../domain/errors.ts";
 import { CaptureRepository } from "../persistence/capture-repository.ts";
 import type { DatabasePool } from "../persistence/database-contracts.ts";
 import { ExpectationRepository } from "../persistence/expectation-repository.ts";
+import {
+  EmployeeOpenExpectationReadRepository,
+  type EmployeeOpenExpectationPage,
+  type EmployeeOpenExpectationQuery,
+} from "../persistence/employee-open-expectation-read-repository.ts";
 import { ManagerClosureReadRepository, type ManagerClosureReadItem } from "../persistence/manager-closure-read-repository.ts";
 import { ManagerDecisionRepository, type PersistedManagerDecisionResult } from "../persistence/manager-decision-repository.ts";
 import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
@@ -53,6 +58,10 @@ export interface ClinicalManagerDecisionInput {
 }
 
 export interface ClinicalPreviewBackend {
+  listOpenExamReportExpectations(
+    context: ActorContext,
+    query: EmployeeOpenExpectationQuery,
+  ): Promise<EmployeeOpenExpectationPage>;
   submitWorkUpdate(context: ActorContext, input: ClinicalWorkUpdateInput): Promise<ClinicalWorkUpdateResult>;
   submitExamReportConsequence?(
     context: ActorContext,
@@ -76,6 +85,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
   readonly #capture: CaptureRepository;
   readonly #closures: ManagerClosureReadRepository;
   readonly #decisions: ManagerDecisionRepository;
+  readonly #openExpectations: EmployeeOpenExpectationReadRepository;
 
   constructor(pool: DatabasePool, options: {
     extractionGoldenPath?: ExtractionGoldenPath;
@@ -90,8 +100,17 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     });
     this.#closures = new ManagerClosureReadRepository(pool);
     this.#decisions = new ManagerDecisionRepository(pool);
+    this.#openExpectations = new EmployeeOpenExpectationReadRepository(pool);
     this.#extractionPath = options.extractionGoldenPath;
     this.#objectIngestion = options.objectIngestion;
+  }
+
+  listOpenExamReportExpectations(
+    context: ActorContext,
+    query: EmployeeOpenExpectationQuery,
+  ): Promise<EmployeeOpenExpectationPage> {
+    assertActorAccess(context, context.clinicId, "EMPLOYEE");
+    return this.#openExpectations.listOpenExamReportExpectations(context, query);
   }
 
   async uploadEvidenceObject(

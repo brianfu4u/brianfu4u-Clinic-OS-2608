@@ -215,6 +215,33 @@ test("closure GET is read-only and ordinary chat never acquires PostgreSQL", asy
   } finally { await pool.close(); }
 });
 
+test("employee open-expectations endpoint is server-scoped, safe, and synthetic-empty", async () => {
+  const pool = new Pool(); await pool.migrate();
+  try {
+    await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
+      const topicId = await prepare(baseUrl);
+      await json(baseUrl, "/api/employee/work-updates", {
+        method: "POST", headers: { "idempotency-key": "open-expectation-registration" },
+        body: JSON.stringify(update(topicId, "REGISTRATION")),
+      });
+      const listed = await json(baseUrl, "/api/employee/open-expectations?limit=1");
+      assert.equal(listed.response.status, 200);
+      assert.equal(listed.body.items.length, 1);
+      assert.deepEqual(Object.keys(listed.body.items[0]).sort(), ["consequenceKind", "dueAt", "expectationId", "state", "workflowFamily"]);
+      assert.doesNotMatch(JSON.stringify(listed.body), /DEMO-001|demo-employee|workflowId|artifact/i);
+      const invalid = await json(baseUrl, "/api/employee/open-expectations?clinicId=other");
+      assert.equal(invalid.response.status, 400);
+      assert.equal(invalid.body.error, "INVALID_EXPECTATION_QUERY");
+    });
+    const synthetic = createPreviewServer();
+    await new Promise<void>((resolve) => synthetic.listen(0, "127.0.0.1", resolve));
+    try {
+      const result = await json(`http://127.0.0.1:${(synthetic.address() as AddressInfo).port}`, "/api/employee/open-expectations");
+      assert.deepEqual(result.body, { items: [], nextCursor: null });
+    } finally { await new Promise<void>((resolve) => synthetic.close(() => resolve())); }
+  } finally { await pool.close(); }
+});
+
 test("formal validation and idempotency fail before acquisition; DB failure appends no message", async () => {
   const pool = new Pool(); await pool.migrate();
   try {

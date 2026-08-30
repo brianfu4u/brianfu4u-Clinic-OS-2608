@@ -42,6 +42,7 @@ const PUBLIC_FILES = new Map([
 const INDEX_FILE = fileURLToPath(new URL("./public/index.html", import.meta.url));
 const EXTRACTION_PATH = "/api/employee/extraction/exam-report";
 const UPLOAD_PATH = "/api/employee/evidence-objects";
+const OPEN_EXPECTATIONS_PATH = "/api/employee/open-expectations";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024 + 1024 * 1024;
 const MAX_UPLOAD_HEADER_BYTES = 16 * 1024;
@@ -235,6 +236,14 @@ async function route(
     );
     return;
   }
+  if (path === OPEN_EXPECTATIONS_PATH) {
+    if (method !== "GET") {
+      sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
+      return;
+    }
+    await handleOpenExpectations(response, url, employeeContext, clinicalBackend, clock());
+    return;
+  }
 
   if (method === "GET" && path === "/") {
     response.writeHead(302, { location: "/employee" });
@@ -380,6 +389,56 @@ async function route(
     return;
   }
   sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
+}
+
+async function handleOpenExpectations(
+  response: ServerResponse,
+  url: URL,
+  employeeContext: ActorContext,
+  clinicalBackend: ClinicalPreviewBackend | undefined,
+  asOf: string,
+): Promise<void> {
+  try {
+    assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
+    const query = parseOpenExpectationQuery(url);
+    if (!clinicalBackend) {
+      sendJson(response, 200, { items: [], nextCursor: null });
+      return;
+    }
+    const page = await clinicalBackend.listOpenExamReportExpectations(employeeContext, { ...query, asOf });
+    sendJson(response, 200, { items: page.items, nextCursor: page.nextCursor });
+  } catch (error) {
+    if (!response.writableEnded && !response.destroyed) {
+      if (error instanceof DomainError && error.code === "INVALID_EXPECTATION_QUERY") {
+        sendJson(response, 400, { error: "INVALID_EXPECTATION_QUERY", message: "Expectation query is invalid." });
+      } else {
+        sendJson(response, 503, { error: "EXPECTATION_LIST_UNAVAILABLE", message: "Open expectations are temporarily unavailable." });
+      }
+    }
+  }
+}
+
+function parseOpenExpectationQuery(url: URL): { limit?: number; cursor?: string } {
+  const seen = new Set<string>();
+  const query: { limit?: number; cursor?: string } = {};
+  for (const [key, value] of url.searchParams) {
+    if (!['limit', 'cursor'].includes(key) || seen.has(key) || value === "") {
+      throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
+    }
+    seen.add(key);
+    if (key === "limit") {
+      if (!/^(?:[1-9]|[1-4][0-9]|50)$/.test(value)) {
+        throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
+      }
+      query.limit = Number(value);
+    } else {
+      if (value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+        throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
+      }
+      query.cursor = value;
+    }
+  }
+  return query;
 }
 
 async function handleExamReportExtraction(

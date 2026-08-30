@@ -12,7 +12,8 @@ const strings = {
     hybrid: "PostgreSQL臨床チェーンは永続化・会話と勤務状態は再起動で消去",
     evidenceFile: "証拠ファイル（PNG/JPEG/PDF）", evidenceHelp: "このファイルはサーバーで保存・抽出されます。",
     evidenceUnavailable: "永続化された証拠アップロードはこの合成プレビューでは利用できません。",
-    missingExpectation: "先に同じ合成IDのREGISTRATIONを記録してください。",
+    missingExpectation: "処理する未完了の検査レポートを選択してください。",
+    expectationSelect: "未完了の検査レポート", expectationLoading: "未完了の検査レポートを読み込み中…", expectationEmpty: "選択できる未完了の検査レポートはありません。",
     chooseEvidence: "PNG、JPEG、またはPDFファイルを選択してください。",
     evidenceCompleted: "証拠を処理しました", extractionReview: "証拠の抽出に確認が必要です。", compositionReview: "ワークフロー照合に確認が必要です。",
     networkError: "プレビューサービスに接続できませんでした。もう一度お試しください。",
@@ -30,7 +31,8 @@ const strings = {
     hybrid: "PostgreSQL临床链持久化；对话和工作状态重启后清空",
     evidenceFile: "证据文件（PNG/JPEG/PDF）", evidenceHelp: "文件将由服务器保存并进行抽取。",
     evidenceUnavailable: "合成预览不提供持久化证据上传。",
-    missingExpectation: "请先记录同一合成编号的REGISTRATION。",
+    missingExpectation: "请选择要处理的未完成检查报告。",
+    expectationSelect: "待处理检查报告", expectationLoading: "正在读取待处理检查报告…", expectationEmpty: "没有可选择的待处理检查报告。",
     chooseEvidence: "请选择PNG、JPEG或PDF文件。",
     evidenceCompleted: "证据已处理", extractionReview: "证据抽取需要复核。", compositionReview: "工作流匹配需要复核。",
     networkError: "无法连接预览服务，请重试。",
@@ -48,7 +50,8 @@ const strings = {
     hybrid: "PostgreSQL clinical chain is durable; chat and work status reset on restart",
     evidenceFile: "Evidence file (PNG/JPEG/PDF)", evidenceHelp: "The server will store and extract this file.",
     evidenceUnavailable: "Durable evidence upload is unavailable in the synthetic preview.",
-    missingExpectation: "Record a REGISTRATION for the same synthetic ID first.",
+    missingExpectation: "Select an open exam report expectation first.",
+    expectationSelect: "Open exam report", expectationLoading: "Loading open exam reports…", expectationEmpty: "No selectable open exam reports.",
     chooseEvidence: "Choose a PNG, JPEG, or PDF evidence file.",
     evidenceCompleted: "Evidence processed", extractionReview: "Evidence extraction needs review.", compositionReview: "Workflow matching needs review.",
     networkError: "The preview service could not be reached. Please try again.",
@@ -60,7 +63,8 @@ let bootstrap = null;
 let activeTopicId = null;
 let managerItems = [];
 let managerFilter = "all";
-const expectationByAnchor = new Map();
+let openExpectations = [];
+let expectationLoadEpoch = 0;
 const pendingDecisionKeys = new Map();
 let postgresClinical = false;
 let evidenceStatus = null;
@@ -105,6 +109,7 @@ function safeServerError(code, status) {
     REQUEST_TIMEOUT: "The operation timed out. Please retry the exact operation.",
     REQUEST_CONFLICT: "This operation conflicts with an existing operation.",
     EVIDENCE_UNAVAILABLE: "The stored evidence is unavailable.",
+    EXPECTATION_LIST_UNAVAILABLE: "Open expectations are temporarily unavailable.",
     FORBIDDEN: "This operation is not permitted.",
   };
   return messages[code] || (status >= 500 ? "The preview service is temporarily unavailable." : "The operation could not be completed.");
@@ -188,6 +193,8 @@ function composer() {
       <label>${t("family")}<input name="workflowFamily" value="EYE_EXAM" readonly></label>
       <label>${t("occurredAt")}<input name="occurredAt" type="datetime-local" value="${local}" required></label>
       <div class="evidence-control" data-evidence-control hidden>
+        <label for="expectation-select">${t("expectationSelect")}</label>
+        <select id="expectation-select" name="expectationId" required disabled><option value="">${t("expectationLoading")}</option></select>
         <label for="evidence-file">${t("evidenceFile")}</label>
         <input id="evidence-file" name="evidenceFile" type="file" accept="image/png,image/jpeg,application/pdf" disabled>
         <p class="muted" data-evidence-help></p>
@@ -206,6 +213,7 @@ function bindComposer() {
     updateEvidenceControl(form);
   }));
   form.elements.kind.addEventListener("change", () => updateEvidenceControl(form));
+  form.elements.identityAnchor.addEventListener("change", () => updateEvidenceControl(form));
   form.addEventListener("input", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("change", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("submit", async (event) => {
@@ -225,11 +233,7 @@ function bindComposer() {
         }, body: JSON.stringify({
           topicId: activeTopicId, kind, identityAnchor,
           workflowFamily: data.get("workflowFamily"), occurredAt: new Date(data.get("occurredAt")).toISOString(), text: data.get("text"),
-          ...(kind === "EXAM_REPORT" ? { expectationId: expectationByAnchor.get(identityAnchor) } : {}),
         }) });
-        if (kind === "REGISTRATION" && result.expectationId) {
-          expectationByAnchor.set(identityAnchor, result.expectationId);
-        }
         delete form.dataset.idempotencyKey;
       } else {
         await api("/api/employee/messages", { method: "POST", body: JSON.stringify({ topicId: activeTopicId, text: data.get("text") }) });
@@ -249,17 +253,44 @@ function updateEvidenceControl(form) {
   const report = form.elements.kind.value === "EXAM_REPORT" && form.elements.mode.value === "work";
   control.hidden = !report;
   file.disabled = !report || !postgresClinical;
+  const select = form.elements.expectationId;
+  select.disabled = !report || !postgresClinical;
   help.textContent = report
     ? postgresClinical ? t("evidenceHelp") : t("evidenceUnavailable")
     : "";
+  if (report && postgresClinical) void loadOpenExpectations(form);
+  if (!report) {
+    openExpectations = [];
+  }
+}
+
+async function loadOpenExpectations(form) {
+  const epoch = ++expectationLoadEpoch;
+  const select = form.elements.expectationId;
+  openExpectations = [];
+  select.innerHTML = `<option value="">${escapeHtml(t("expectationLoading"))}</option>`;
+  select.disabled = true;
+  try {
+    const page = validateOpenExpectationPage(await api("/api/employee/open-expectations?limit=25"));
+    if (epoch !== expectationLoadEpoch || form.elements.kind.value !== "EXAM_REPORT" || form.elements.mode.value !== "work") return;
+    openExpectations = page.items;
+    select.innerHTML = `<option value="">${escapeHtml(page.items.length ? t("expectationSelect") : t("expectationEmpty"))}</option>` +
+      page.items.map((item) => `<option value="${escapeHtml(item.expectationId)}">${escapeHtml(`${item.workflowFamily} · ${item.consequenceKind} · ${new Date(item.dueAt).toLocaleString(language)}`)}</option>`).join("");
+    select.disabled = page.items.length === 0;
+  } catch {
+    if (epoch !== expectationLoadEpoch) return;
+    select.innerHTML = `<option value="">${escapeHtml(t("expectationEmpty"))}</option>`;
+    select.disabled = true;
+    openExpectations = [];
+  }
 }
 
 async function submitExamReport(form, data, identityAnchor) {
   if (!postgresClinical) {
     throw new Error(t("evidenceUnavailable"));
   }
-  const expectationId = expectationByAnchor.get(identityAnchor);
-  if (!expectationId) {
+  const expectationId = data.get("expectationId");
+  if (typeof expectationId !== "string" || !openExpectations.some((item) => item.expectationId === expectationId)) {
     throw new Error(t("missingExpectation"));
   }
   const file = data.get("evidenceFile");
@@ -304,6 +335,18 @@ async function submitExamReport(form, data, identityAnchor) {
   } finally {
     submit.disabled = false;
   }
+}
+
+function validateOpenExpectationPage(value) {
+  if (!isPlainObject(value) || !exactKeys(value, ["items", "nextCursor"]) || !Array.isArray(value.items) || value.items.length > 50 ||
+      !(value.nextCursor === null || (typeof value.nextCursor === "string" && /^[A-Za-z0-9_-]{1,512}$/.test(value.nextCursor)))) throw new Error(t("networkError"));
+  const items = value.items.map((item) => {
+    if (!isPlainObject(item) || !exactKeys(item, ["consequenceKind", "dueAt", "expectationId", "state", "workflowFamily"]) ||
+        !isBoundedId(item.expectationId) || typeof item.workflowFamily !== "string" || item.workflowFamily.length < 1 || item.workflowFamily.length > 128 ||
+        item.consequenceKind !== "EXAM_REPORT" || item.state !== "OPEN" || typeof item.dueAt !== "string" || Number.isNaN(Date.parse(item.dueAt))) throw new Error(t("networkError"));
+    return { expectationId: item.expectationId, workflowFamily: item.workflowFamily, consequenceKind: "EXAM_REPORT", dueAt: item.dueAt, state: "OPEN" };
+  });
+  return { items, nextCursor: value.nextCursor };
 }
 
 function safeUploadFilename(file) {
