@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, symlink, truncate } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, rm, symlink, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -52,7 +52,8 @@ class MemoryFixture implements ObjectStoreProvider {
     this.invocations += 1;
     const key = `${request.clinicId}:${request.objectId}`;
     const existing = this.values.get(key);
-    if (existing && existing.ref.contentSha256 !== request.contentSha256) {
+    if (existing && (existing.ref.contentSha256 !== request.contentSha256 ||
+      existing.ref.mediaType !== request.mediaType)) {
       throw new DomainError("OBJECT_ID_CONFLICT", "Object ID conflict.");
     }
     const ref = { clinicId: request.clinicId, objectId: request.objectId,
@@ -93,7 +94,7 @@ test("exact replay is idempotent and conflicting replay never overwrites", async
   t.after(() => rm(root, { recursive: true, force: true }));
   const command = { objectId: "same", mediaType: "application/pdf", bytes: BYTES };
   assert.deepEqual(await gateway.put(CONTEXT, command), await gateway.put(CONTEXT, command));
-  await assert.rejects(gateway.put(CONTEXT, { ...command, bytes: new Uint8Array([9]) }), hasCode("OBJECT_ID_CONFLICT"));
+  await assert.rejects(gateway.put(CONTEXT, { ...command, bytes: new Uint8Array([9]) }), hasCode("OBJECT_STORE_PROVIDER_FAILED"));
   assert.deepEqual((await gateway.get(CONTEXT, { objectId: "same" })).bytes, BYTES);
 });
 
@@ -143,8 +144,25 @@ test("symlink tenant escape fails without writing outside root", async (t) => {
   const tenant = digest(`clinic:${CONTEXT.clinicId}`);
   await symlink(outside, join(root, tenant));
   const gateway = new ObjectStoreGateway(strict(), new LocalObjectStore(root));
-  await assert.rejects(gateway.put(CONTEXT, { objectId: "escape", mediaType: "image/png", bytes: BYTES }), hasCode("OBJECT_STORE_IO_FAILED"));
+  await assert.rejects(gateway.put(CONTEXT, { objectId: "escape", mediaType: "image/png", bytes: BYTES }), hasCode("OBJECT_STORE_PROVIDER_FAILED"));
   assert.deepEqual(await readFileNames(outside), []);
+});
+
+test("local root and tenant directories are hardened to 0700 and broad root is rejected", async (t) => {
+  assert.throws(() => new LocalObjectStore("/"), hasCode("INVALID_OBJECT_STORE_ROOT"));
+  assert.throws(() => new LocalObjectStore("/tmp/.."), hasCode("INVALID_OBJECT_STORE_ROOT"));
+  const root = await mkdtemp(join(tmpdir(), "clinic-os-permissions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await chmod(root, 0o777);
+  const tenant = join(root, digest(`clinic:${CONTEXT.clinicId}`));
+  await mkdir(tenant, { mode: 0o777 });
+  await chmod(tenant, 0o777);
+  const gateway = new ObjectStoreGateway(strict(), new LocalObjectStore(root));
+  await gateway.put(CONTEXT, { objectId: "permissions", mediaType: "image/png", bytes: BYTES });
+  assert.equal((await lstat(root)).mode & 0o777, 0o700);
+  assert.equal((await lstat(tenant)).mode & 0o777, 0o700);
+  const file = join(tenant, digest("object:permissions"));
+  assert.equal((await lstat(file)).mode & 0o777, 0o600);
 });
 
 test("on-disk truncation is detected on get", async (t) => {
@@ -153,7 +171,7 @@ test("on-disk truncation is detected on get", async (t) => {
   await gateway.put(CONTEXT, { objectId: "damaged", mediaType: "image/png", bytes: BYTES });
   const file = join(root, digest(`clinic:${CONTEXT.clinicId}`), digest("object:damaged"));
   await truncate(file, 5);
-  await assert.rejects(gateway.get(CONTEXT, { objectId: "damaged" }), hasCode("OBJECT_INTEGRITY_FAILED"));
+  await assert.rejects(gateway.get(CONTEXT, { objectId: "damaged" }), hasCode("OBJECT_STORE_PROVIDER_FAILED"));
 });
 
 test("manifest mismatch, Strict cloud provider and identity mutation fail closed", async () => {
@@ -165,6 +183,32 @@ test("manifest mismatch, Strict cloud provider and identity mutation fail closed
   provider.kind = "CLOUD_OBJECT_STORE";
   await assert.rejects(gateway.put(CONTEXT, { objectId: "x", mediaType: "image/png", bytes: BYTES }), hasCode("OBJECT_STORE_PROVIDER_IDENTITY_CHANGED"));
   assert.equal(provider.invocations, 0);
+});
+
+test("Hybrid requires local storage and manifest input is snapshotted", async () => {
+  const manifest: RuntimeManifest = { ...strict(), profile: "ON_PREM_HYBRID" };
+  const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+  const gateway = new ObjectStoreGateway(manifest, provider);
+  manifest.fileProvider = "CLOUD_OBJECT_STORE";
+  await gateway.put(CONTEXT, { objectId: "snapshot", mediaType: "image/png", bytes: BYTES });
+  assert.throws(
+    () => new ObjectStoreGateway({ ...strict(), profile: "ON_PREM_HYBRID", fileProvider: "CLOUD_OBJECT_STORE" }, new MemoryFixture("CLOUD_OBJECT_STORE")),
+    hasCode("PROFILE_PROVIDER_INCOMPATIBLE"),
+  );
+});
+
+test("provider identity mutation during await fails before receipt", async () => {
+  const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => { release = resolve; });
+  const original = provider.put.bind(provider);
+  provider.put = async (context, request) => { await waiting; return original(context, request); };
+  const gateway = new ObjectStoreGateway(strict(), provider);
+  const pending = gateway.put(CONTEXT, { objectId: "mutated", mediaType: "image/png", bytes: BYTES });
+  provider.kind = "CLOUD_OBJECT_STORE";
+  release();
+  await assert.rejects(pending, hasCode("OBJECT_STORE_PROVIDER_IDENTITY_CHANGED"));
+  assert.deepEqual(gateway.listReceipts(CONTEXT), []);
 });
 
 test("malformed provider refs fail without receipt", async () => {
@@ -183,6 +227,51 @@ test("malformed provider refs fail without receipt", async () => {
   }
 });
 
+test("malformed, empty and oversize provider get responses fail without receipt", async () => {
+  const cases: Array<(response: ProviderGetResponse) => unknown> = [
+    (response) => ({ ...response, bytes: "not-bytes" }),
+    (response) => ({ ...response, bytes: new Uint8Array() }),
+    (response) => ({ ...response, bytes: new Uint8Array(MAX_OBJECT_SIZE_BYTES + 1) }),
+    (response) => ({ ...response, ref: { ...response.ref, clinicId: "other" } }),
+    (response) => ({ ...response, ref: { ...response.ref, contentSha256: "0".repeat(64) } }),
+  ];
+  for (const mutate of cases) {
+    const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+    const gateway = new ObjectStoreGateway(strict(), provider);
+    await gateway.put(CONTEXT, { objectId: "get-bad", mediaType: "image/png", bytes: BYTES });
+    gateway.listReceipts(CONTEXT).length = 0;
+    const original = provider.get.bind(provider);
+    provider.get = async (context, request) => mutate(await original(context, request)) as ProviderGetResponse;
+    const before = gateway.listReceipts(CONTEXT).length;
+    await assert.rejects(gateway.get(CONTEXT, { objectId: "get-bad" }), hasCode("INVALID_OBJECT_STORE_RESPONSE"));
+    assert.equal(gateway.listReceipts(CONTEXT).length, before);
+  }
+});
+
+test("provider exceptions are sanitized and never create receipts", async () => {
+  const provider = new MemoryFixture("LOCAL_OBJECT_STORE");
+  provider.put = async () => { throw new Error("patient-name /private/clinic/root"); };
+  const gateway = new ObjectStoreGateway(strict(), provider);
+  await assert.rejects(
+    gateway.put(CONTEXT, { objectId: "safe", mediaType: "image/png", bytes: BYTES }),
+    (error: unknown) => error instanceof DomainError && error.code === "OBJECT_STORE_PROVIDER_FAILED" &&
+      error.message === "Object store provider operation failed." && !error.message.includes("patient-name"),
+  );
+  assert.deepEqual(gateway.listReceipts(CONTEXT), []);
+
+  const getProvider = new MemoryFixture("LOCAL_OBJECT_STORE");
+  const getGateway = new ObjectStoreGateway(strict(), getProvider);
+  await getGateway.put(CONTEXT, { objectId: "get-safe", mediaType: "image/png", bytes: BYTES });
+  getProvider.get = async () => { throw new DomainError("OBJECT_NOT_FOUND", "patient /private/root"); };
+  const receiptCount = getGateway.listReceipts(CONTEXT).length;
+  await assert.rejects(
+    getGateway.get(CONTEXT, { objectId: "get-safe" }),
+    (error: unknown) => error instanceof DomainError && error.code === "OBJECT_STORE_PROVIDER_FAILED" &&
+      error.message === "Object store provider operation failed.",
+  );
+  assert.equal(getGateway.listReceipts(CONTEXT).length, receiptCount);
+});
+
 test("local and cloud fixture share the gateway contract", async (t) => {
   const { root, gateway: local } = await localGateway();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -191,6 +280,20 @@ test("local and cloud fixture share the gateway contract", async (t) => {
     const ref = await gateway.put(CONTEXT, { objectId: "contract", mediaType: "application/pdf", bytes: BYTES });
     assert.equal(ref.contentSha256, digest(BYTES));
     assert.deepEqual((await gateway.get(CONTEXT, { objectId: "contract" })).bytes, BYTES);
+  }
+});
+
+test("same ID and bytes with a different media type conflicts for local and fixture providers", async (t) => {
+  const { root, gateway: local } = await localGateway();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = new ObjectStoreGateway(cloud(), new MemoryFixture("CLOUD_OBJECT_STORE"));
+  for (const gateway of [local, fixture]) {
+    await gateway.put(CONTEXT, { objectId: "typed", mediaType: "image/png", bytes: BYTES });
+    await assert.rejects(
+      gateway.put(CONTEXT, { objectId: "typed", mediaType: "audio/wav", bytes: BYTES }),
+      hasCode("OBJECT_STORE_PROVIDER_FAILED"),
+    );
+    assert.equal((await gateway.get(CONTEXT, { objectId: "typed" })).ref.mediaType, "image/png");
   }
 });
 

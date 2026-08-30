@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, link, mkdir, open, readFile, realpath, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { chmod, lstat, link, mkdir, open, realpath, unlink, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 import { DomainError } from "../domain/errors.ts";
@@ -24,7 +24,11 @@ export class LocalObjectStore implements ObjectStoreProvider {
     if (typeof root !== "string" || !isAbsolute(root)) {
       throw new DomainError("INVALID_OBJECT_STORE_ROOT", "Local object store root must be absolute.");
     }
-    this.#root = root;
+    const normalizedRoot = resolve(root);
+    if (dirname(normalizedRoot) === normalizedRoot) {
+      throw new DomainError("INVALID_OBJECT_STORE_ROOT", "Local object store root must not be a filesystem root.");
+    }
+    this.#root = normalizedRoot;
     this.#ready = this.#initialize();
   }
 
@@ -63,8 +67,11 @@ export class LocalObjectStore implements ObjectStoreProvider {
   async #initialize(): Promise<string> {
     try {
       await mkdir(this.#root, { recursive: true, mode: 0o700 });
-      const stat = await lstat(this.#root);
+      let stat = await lstat(this.#root);
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe root");
+      await chmod(this.#root, 0o700);
+      stat = await lstat(this.#root);
+      if ((stat.mode & 0o777) !== 0o700) throw new Error("unsafe root permissions");
       return realpath(this.#root);
     } catch (error) {
       throw safeStorageError(error);
@@ -80,6 +87,11 @@ export class LocalObjectStore implements ObjectStoreProvider {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw safeStorageError(error);
     }
     try {
+      let stat = await lstat(clinicDirectory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe tenant directory");
+      await chmod(clinicDirectory, 0o700);
+      stat = await lstat(clinicDirectory);
+      if ((stat.mode & 0o777) !== 0o700) throw new Error("unsafe tenant permissions");
       const currentRoot = await realpath(this.#root);
       const currentClinic = await realpath(clinicDirectory);
       const rel = relative(currentRoot, currentClinic);

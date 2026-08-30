@@ -60,7 +60,12 @@ export class ObjectStoreGateway {
       mediaType: command.mediaType,
     };
     this.#assertProviderIdentity();
-    const response = await this.#provider.put(structuredClone(context), { ...expected, bytes });
+    let response: StoredObjectRef;
+    try {
+      response = await this.#provider.put(structuredClone(context), { ...expected, bytes });
+    } catch {
+      throw new DomainError("OBJECT_STORE_PROVIDER_FAILED", "Object store provider operation failed.");
+    }
     this.#assertProviderIdentity();
     const ref = validateRef(response, expected);
     this.#receipts.push(Object.freeze({ ...ref, operation: "PUT" }));
@@ -74,12 +79,15 @@ export class ObjectStoreGateway {
     const clinicId = context.clinicId;
     const objectId = command.objectId;
     this.#assertProviderIdentity();
-    const response = await this.#provider.get(structuredClone(context), {
-      clinicId,
-      objectId,
-    });
+    let response: ProviderGetResponse;
+    try {
+      response = await this.#provider.get(structuredClone(context), { clinicId, objectId });
+    } catch {
+      throw new DomainError("OBJECT_STORE_PROVIDER_FAILED", "Object store provider operation failed.");
+    }
     this.#assertProviderIdentity();
-    if (!response || !(response.bytes instanceof Uint8Array)) {
+    if (!response || !(response.bytes instanceof Uint8Array) || response.bytes.byteLength === 0 ||
+      response.bytes.byteLength > MAX_OBJECT_SIZE_BYTES) {
       throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Provider get response is invalid.");
     }
     const bytes = new Uint8Array(response.bytes);
