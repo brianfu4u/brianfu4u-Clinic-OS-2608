@@ -1,6 +1,6 @@
 # WO-030 — Persisted Clinical Closure Acceptance Demo
 
-**Status:** Frozen for Builder  
+**Status:** Accepted — Architecture Review passed 2026-08-30  
 **Architect:** Codex Architecture Designer  
 **Builder:** delegated Codex Builder  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`  
@@ -191,3 +191,17 @@ test(acceptance): add persisted clinical closure demo
 Do not push. Report changed files, targeted/full test counts, the exact bounded demo output, and
 the external PostgreSQL gate separately. Architecture Review will independently inspect that no
 business state was seeded or mutated by direct SQL and that replay did not quietly rerun inference.
+
+## Architecture acceptance
+
+Accepted after commit `914d177` and independent review.
+
+- Full regression: 353/353.
+- Closure, Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- The fixed-clock non-PHI demo exercises registration, scoped selection, object ingestion,
+  extraction, authoritative attach, S2 verification, manager closure and exact replay.
+- Cross-employee, cross-clinic, expired, wrong-chain and replay-tampering paths are blocked.
+- GitHub push remains deferred for the batch release.
