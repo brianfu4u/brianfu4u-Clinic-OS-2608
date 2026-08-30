@@ -95,3 +95,5 @@ the gateway enforces a 25 MiB per-object limit. It is not yet wired to Artifact 
 Stored evidence can now pass through a narrow extraction boundary that assembles a candidate
 Artifact and FactCard after deterministic schema and authority-key validation. The included tests
 use a synthetic local provider only; real OCR/model integration and persistence remain separate.
+The synthetic extraction spec freezes its fixture model identity; a real adapter requires a new
+server-approved spec and contract tests rather than silently reusing that fixture identity.

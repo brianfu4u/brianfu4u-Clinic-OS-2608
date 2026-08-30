@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { types } from "node:util";
 
 import { assertActorContext } from "../domain/access-context.ts";
 import type { ActorContext, Artifact, EvidenceFactCard } from "../domain/contracts.ts";
@@ -6,7 +7,9 @@ import { DomainError } from "../domain/errors.ts";
 import { assertFactCardIdentitySource, requireClinicalIdentity } from "../domain/identity-gate.ts";
 import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
 import type { InferenceRequest, InferenceResponse } from "../runtime/contracts.ts";
+import { InferenceGateway } from "../runtime/inference-gateway.ts";
 import type { ProviderGetResponse, StoredObjectRef } from "../storage/contracts.ts";
+import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
 
 const COMMAND_KEYS = [
   "artifactId", "createdAt", "factCardId", "identityAnchor", "kind", "objectRef",
@@ -36,6 +39,9 @@ const FORBIDDEN_KEYS = new Set([
 ]);
 const MAX_FIELD_COUNT = 64;
 const MAX_FIELDS_JSON_BYTES = 64 * 1024;
+const MAX_CANDIDATE_ARRAY_LENGTH = 256;
+const MAX_CANDIDATE_NODES = 4096;
+const MAX_CANDIDATE_STRING_BYTES = 64 * 1024;
 
 export interface ExtractionSpec {
   capability: string;
@@ -116,26 +122,18 @@ export type StoredEvidenceExtractionResult =
       lineage: ExtractionLineage;
     };
 
-type ObjectReadPort = {
-  get(context: ActorContext, command: { objectId: string }): Promise<ProviderGetResponse>;
-};
-
-type InferencePort = {
-  infer(context: ActorContext, request: InferenceRequest): Promise<InferenceResponse>;
-};
-
 export class StoredEvidenceExtractionService {
-  readonly #objects: ObjectReadPort;
-  readonly #inference: InferencePort;
+  readonly #objects: ObjectStoreGateway;
+  readonly #inference: InferenceGateway;
   readonly #spec: ExtractionSpec;
 
   constructor(dependencies: {
-    objects: ObjectReadPort;
-    inference: InferencePort;
+    objects: ObjectStoreGateway;
+    inference: InferenceGateway;
     spec?: ExtractionSpec;
   }) {
-    if (!dependencies || typeof dependencies.objects?.get !== "function" ||
-      typeof dependencies.inference?.infer !== "function") {
+    if (!dependencies || !(dependencies.objects instanceof ObjectStoreGateway) ||
+      !(dependencies.inference instanceof InferenceGateway)) {
       throw new DomainError("INVALID_EXTRACTION_DEPENDENCY", "Extraction dependencies are invalid.");
     }
     this.#objects = dependencies.objects;
@@ -313,7 +311,7 @@ function validateObjectRef(ref: StoredObjectRef): void {
 function validateCandidate(output: unknown, spec: ExtractionSpec): ExtractionCandidate {
   let candidate: ExtractionCandidate;
   try {
-    assertSafeCandidateData(output, 0);
+    assertSafeCandidateData(output, 0, { nodes: 0, stringBytes: 0 });
     candidate = structuredClone(output) as ExtractionCandidate;
   } catch {
     throw new DomainError("INVALID_EXTRACTION_CANDIDATE", "Extraction candidate is not cloneable.");
@@ -368,18 +366,29 @@ function validateInferenceResponse(
   return response;
 }
 
-function assertSafeCandidateData(value: unknown, depth: number): void {
+function assertSafeCandidateData(
+  value: unknown,
+  depth: number,
+  budget: { nodes: number; stringBytes: number },
+): void {
   try {
-    if (depth > 16) throw new Error();
-    if (value === null || ["string", "boolean"].includes(typeof value)) return;
+    budget.nodes += 1;
+    if (depth > 16 || budget.nodes > MAX_CANDIDATE_NODES) throw new Error();
+    if (typeof value === "string") {
+      budget.stringBytes += Buffer.byteLength(value);
+      if (budget.stringBytes > MAX_CANDIDATE_STRING_BYTES) throw new Error();
+      return;
+    }
+    if (value === null || typeof value === "boolean") return;
     if (typeof value === "number") {
       if (!Number.isFinite(value)) throw new Error();
       return;
     }
-    if (typeof value !== "object") throw new Error();
+    if (typeof value !== "object" || types.isProxy(value)) throw new Error();
     const array = Array.isArray(value);
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) throw new Error();
+    if (array && value.length > MAX_CANDIDATE_ARRAY_LENGTH) throw new Error();
     const keys = Reflect.ownKeys(value);
     if (keys.some((key) => typeof key === "symbol")) throw new Error();
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -392,10 +401,12 @@ function assertSafeCandidateData(value: unknown, depth: number): void {
     for (const [key, descriptor] of Object.entries(descriptors)) {
       if (key === "length" && array) continue;
       if (!Object.hasOwn(descriptor, "value")) throw new Error();
+      budget.stringBytes += Buffer.byteLength(key);
+      if (budget.stringBytes > MAX_CANDIDATE_STRING_BYTES) throw new Error();
       if (FORBIDDEN_KEYS.has(key)) {
         throw new DomainError("EXTRACTION_AUTHORITY_INJECTION", "Model output contains a forbidden authority field.");
       }
-      assertSafeCandidateData(descriptor.value, depth + 1);
+      assertSafeCandidateData(descriptor.value, depth + 1, budget);
     }
   } catch (error) {
     if (error instanceof DomainError) throw error;

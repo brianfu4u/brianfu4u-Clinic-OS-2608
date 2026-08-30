@@ -72,6 +72,16 @@ class FixtureProvider implements InferenceProvider {
   }
 }
 
+class RawProvider implements InferenceProvider {
+  readonly kind = "LOCAL_MODEL" as const;
+  readonly modelId = "deterministic-local-fixture";
+  response!: InferenceResponse;
+
+  async infer(): Promise<InferenceResponse> {
+    return this.response;
+  }
+}
+
 async function setup(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "clinic-os-extraction-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -171,11 +181,6 @@ test("missing or damaged objects never invoke inference", async (t) => {
   await assert.rejects(service.extract(CONTEXT, command({ ...ref, objectId: "missing" })), code("OBJECT_NOT_FOUND"));
   await rm(root, { recursive: true, force: true });
   await assert.rejects(service.extract(CONTEXT, command(ref)));
-  const damagedService = new StoredEvidenceExtractionService({
-    objects: { get: async () => ({ ref, bytes: new Uint8Array(ref.sizeBytes) }) },
-    inference: new InferenceGateway(strict(), provider),
-  });
-  await assert.rejects(damagedService.extract(CONTEXT, command(ref)), code("STORED_OBJECT_MISMATCH"));
   assert.equal(provider.invocations, 0);
 });
 
@@ -199,7 +204,7 @@ test("response request, schema and model mismatches fail without FactCard", asyn
   }
 });
 
-test("service validates inference envelopes even behind a structural fake port", async (t) => {
+test("service validates inference envelopes returned through the real gateway", async (t) => {
   const { ref, objects } = await setup(t);
   const invalid = [
     { requestId: "other", providerKind: "LOCAL_MODEL", modelId: EYE_EXAM_EXTRACTION_SPEC.modelId, schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30T12:00:00.000Z" },
@@ -209,9 +214,11 @@ test("service validates inference envelopes even behind a structural fake port",
     { requestId: "extract-1", providerKind: "LOCAL_MODEL", modelId: EYE_EXAM_EXTRACTION_SPEC.modelId, schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion, output: READY, completedAt: "2026-08-30T12:00:00.000Z", authority: true },
   ];
   for (const response of invalid) {
+    const provider = new RawProvider();
+    provider.response = response as InferenceResponse;
     const service = new StoredEvidenceExtractionService({
       objects,
-      inference: { infer: async () => response as InferenceResponse },
+      inference: new InferenceGateway(strict(), provider),
     });
     await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_INFERENCE_RESPONSE"));
   }
@@ -237,10 +244,32 @@ test("candidate accessors, symbols, custom prototypes and hostile proxies fail w
       output,
       completedAt: "2026-08-30T12:00:00.000Z",
     };
-    const service = new StoredEvidenceExtractionService({ objects, inference: { infer: async () => response } });
-    await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_EXTRACTION_CANDIDATE"));
+    const provider = new RawProvider();
+    provider.response = response;
+    const service = new StoredEvidenceExtractionService({ objects, inference: new InferenceGateway(strict(), provider) });
+    await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_INFERENCE_RESPONSE"));
   }
   assert.equal(getterCalls, 0);
+});
+
+test("huge sparse candidate arrays fail quickly at the shared response boundary", async (t) => {
+  const { ref, objects } = await setup(t);
+  const sparse: unknown[] = [];
+  sparse.length = 1_000_000_000;
+  const provider = new RawProvider();
+  provider.response = {
+    requestId: "extract-1",
+    providerKind: "LOCAL_MODEL",
+    modelId: EYE_EXAM_EXTRACTION_SPEC.modelId,
+    schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion,
+    output: { ...READY, fields: { reportType: "fundus", values: sparse } },
+    completedAt: "2026-08-30T12:00:00.000Z",
+  };
+  const service = new StoredEvidenceExtractionService({
+    objects,
+    inference: new InferenceGateway(strict(), provider),
+  });
+  await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_INFERENCE_RESPONSE"));
 });
 
 test("taxonomy escape, non-JSON values, oversized fields and invalid confidence fail", async (t) => {
@@ -256,7 +285,11 @@ test("taxonomy escape, non-JSON values, oversized fields and invalid confidence 
   for (const output of outputs) {
     const { ref, provider, service } = await setup(t);
     provider.output = output;
-    await assert.rejects(service.extract(CONTEXT, command(ref)), code("INVALID_EXTRACTION_CANDIDATE"));
+    await assert.rejects(
+      service.extract(CONTEXT, command(ref)),
+      (error: unknown) => error instanceof DomainError &&
+        ["INVALID_EXTRACTION_CANDIDATE", "INVALID_INFERENCE_RESPONSE"].includes(error.code),
+    );
   }
 });
 
@@ -333,8 +366,12 @@ test("lineage exposes no bytes, path, model output or identity", async (t) => {
 });
 
 test("service dependencies expose no persistence or domain write authority", async (t) => {
-  const { service } = await setup(t);
+  const { service, objects, inference } = await setup(t);
   for (const forbidden of ["repository", "saveCapture", "workflow", "expectation", "decision"]) {
     assert.equal(forbidden in service, false);
   }
+  assert.throws(
+    () => new StoredEvidenceExtractionService({ objects: { get: objects.get.bind(objects) } as never, inference }),
+    code("INVALID_EXTRACTION_DEPENDENCY"),
+  );
 });

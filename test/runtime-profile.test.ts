@@ -272,6 +272,32 @@ test("uncloneable provider output fails atomically without receipt", async () =>
   }
 });
 
+test("response accessors and proxies fail inertly before clone without trap execution", async () => {
+  let getterCalls = 0;
+  let proxyCalls = 0;
+  const outputs: unknown[] = [
+    Object.defineProperty({}, "secret", {
+      enumerable: true,
+      get() { getterCalls += 1; return "phi"; },
+    }),
+    new Proxy({}, {
+      ownKeys() { proxyCalls += 1; throw new Error("must not run"); },
+      getPrototypeOf() { proxyCalls += 1; throw new Error("must not run"); },
+    }),
+  ];
+  for (const output of outputs) {
+    const gateway = new InferenceGateway(
+      strict(),
+      new DeterministicInferenceFixture("LOCAL_MODEL", (response) => ({ ...response, output })),
+    );
+    await assert.rejects(gateway.infer(CONTEXT, REQUEST), (error: unknown) =>
+      error instanceof DomainError && error.code === "INVALID_INFERENCE_RESPONSE");
+    assert.deepEqual(gateway.listReceipts(CONTEXT), []);
+  }
+  assert.equal(getterCalls, 0);
+  assert.equal(proxyCalls, 0);
+});
+
 test("local and private-cloud fixtures satisfy the same inference contract", async () => {
   const configurations: Array<[RuntimeManifest, InferenceProviderKind]> = [
     [strict(), "LOCAL_MODEL"],

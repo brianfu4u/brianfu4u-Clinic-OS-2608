@@ -1,3 +1,5 @@
+import { types } from "node:util";
+
 import { assertActorContext } from "../domain/access-context.ts";
 import type { ActorContext } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
@@ -84,6 +86,7 @@ export class InferenceGateway {
       structuredClone(request),
     );
     this.#assertProviderIdentity();
+    assertInertResponseData(response);
     validateResponse(
       response,
       request,
@@ -124,6 +127,65 @@ export class InferenceGateway {
         "Inference provider identity changed after gateway construction.",
       );
     }
+  }
+}
+
+const RESPONSE_LIMITS = {
+  arrayLength: 256,
+  depth: 16,
+  nodes: 4096,
+  stringBytes: 256 * 1024,
+};
+
+function assertInertResponseData(value: unknown): void {
+  const budget = { nodes: 0, stringBytes: 0 };
+  try {
+    visit(value, 0, budget);
+  } catch {
+    throw new DomainError(
+      "INVALID_INFERENCE_RESPONSE",
+      "Inference response must be bounded inert data.",
+    );
+  }
+}
+
+function visit(
+  value: unknown,
+  depth: number,
+  budget: { nodes: number; stringBytes: number },
+): void {
+  budget.nodes += 1;
+  if (budget.nodes > RESPONSE_LIMITS.nodes || depth > RESPONSE_LIMITS.depth) throw new Error();
+  if (typeof value === "string") {
+    budget.stringBytes += Buffer.byteLength(value);
+    if (budget.stringBytes > RESPONSE_LIMITS.stringBytes) throw new Error();
+    return;
+  }
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error();
+    return;
+  }
+  if (typeof value !== "object" || types.isProxy(value)) throw new Error();
+  const array = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) throw new Error();
+  if (array && value.length > RESPONSE_LIMITS.arrayLength) throw new Error();
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === "symbol") || keys.length > RESPONSE_LIMITS.nodes) throw new Error();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (array) {
+    if (Object.keys(descriptors).some((key) => key !== "length" && !/^(0|[1-9]\d*)$/.test(key))) throw new Error();
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(descriptors, String(index))) throw new Error();
+    }
+  }
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (key === "length" && array) continue;
+    if (!Object.hasOwn(descriptor, "value")) throw new Error();
+    budget.stringBytes += Buffer.byteLength(key);
+    if (budget.stringBytes > RESPONSE_LIMITS.stringBytes) throw new Error();
+    visit(descriptor.value, depth + 1, budget);
   }
 }
 
