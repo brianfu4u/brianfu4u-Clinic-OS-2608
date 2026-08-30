@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -17,7 +17,8 @@ import {
   TesseractOcrProvider,
   TesseractProcessFailure,
   createNodeTesseractProcessRunner,
-  type TesseractModelManifest,
+  FROZEN_TESSERACT_MANIFEST,
+  validateFrozenTesseractAssetsForTest,
   type TesseractProcessInvocation,
   type TesseractProcessResult,
   type TesseractProcessRunner,
@@ -34,26 +35,6 @@ function hash(value: Uint8Array | string): string {
 
 function row(word: string, confidence = 95): string {
   return `5\t1\t1\t1\t1\t1\t0\t0\t10\t10\t${confidence}\t${word}\n`;
-}
-
-function manifest(executable: string, eng: string, osd: string): TesseractModelManifest {
-  return {
-    manifestVersion: "tesseract-model-manifest-v1",
-    modelId: TESSERACT_OCR_MODEL_ID,
-    engineName: "tesseract",
-    engineVersion: "5.3.4",
-    leptonicaVersion: "1.82.0",
-    purpose: "synthetic-english-eye-exam-ocr-smoke",
-    executableSha256: hash(executable),
-    engTraineddataSha256: hash(eng),
-    osdTraineddataSha256: hash(osd),
-    language: "eng",
-    licenseSpdx: "Apache-2.0",
-    schemaVersion: TESSERACT_OCR_SCHEMA_VERSION,
-    minimumHardware: "synthetic-test",
-    rollbackModelId: "disabled",
-    offlinePackageReference: "synthetic-test",
-  };
 }
 
 class FixtureRunner implements TesseractProcessRunner {
@@ -80,20 +61,21 @@ async function setup(t: test.TestContext) {
   const executable = join(root, "tesseract");
   const tessdata = join(root, "tessdata");
   const engPath = join(tessdata, "eng.traineddata");
-  const osdPath = join(tessdata, "osd.traineddata");
+  const configs = join(tessdata, "configs");
+  const tsvPath = join(configs, "tsv");
   await mkdir(tessdata);
-  await writeFile(executable, "binary");
-  await writeFile(engPath, "eng-model");
-  await writeFile(osdPath, "osd-model");
+  await mkdir(configs);
+  await writeFile(executable, await readFile("/usr/bin/tesseract"));
+  await writeFile(engPath, await readFile("/usr/share/tesseract-ocr/5/tessdata/eng.traineddata"));
+  await writeFile(tsvPath, await readFile("/usr/share/tesseract-ocr/5/tessdata/configs/tsv"));
   const runner = new FixtureRunner();
   const provider = new TesseractOcrProvider({
     executablePath: executable,
     tessdataDir: tessdata,
-    manifest: manifest("binary", "eng-model", "osd-model"),
     runner,
     timeoutMs: 1_000,
   });
-  return { root, executable, engPath, osdPath, runner, provider };
+  return { root, executable, tessdata, engPath, tsvPath, runner, provider };
 }
 
 function request(overrides: Record<string, unknown> = {}): InferenceRequest {
@@ -169,29 +151,77 @@ test("manifest, binary and model mutation are checked before every inference", a
   await provider.infer(CONTEXT, request());
   await writeFile(engPath, "mutated");
   await assert.rejects(provider.infer(CONTEXT, request()), code("OCR_MODEL_INTEGRITY_FAILED"));
-  await writeFile(engPath, "eng-model");
+  await writeFile(engPath, await readFile("/usr/share/tesseract-ocr/5/tessdata/eng.traineddata"));
   await writeFile(executable, "mutated");
   await assert.rejects(provider.infer(CONTEXT, request()), code("OCR_MODEL_INTEGRITY_FAILED"));
   assert.equal(runner.invocations.length, 2);
 });
 
+test("asset owners, permissions and directory path identity fail closed", async (t) => {
+  const unsafeFile = await setup(t);
+  await chmod(unsafeFile.engPath, 0o666);
+  await assert.rejects(unsafeFile.provider.infer(CONTEXT, request()), code("OCR_MODEL_INTEGRITY_FAILED"));
+  assert.equal(unsafeFile.runner.invocations.length, 0);
+
+  const unsafeDirectory = await setup(t);
+  await chmod(unsafeDirectory.tessdata, 0o777);
+  await assert.rejects(unsafeDirectory.provider.infer(CONTEXT, request()), code("OCR_MODEL_INTEGRITY_FAILED"));
+
+  const swapped = await setup(t);
+  const displaced = join(swapped.root, "displaced-tessdata");
+  const outside = join(swapped.root, "outside");
+  await mkdir(outside);
+  await assert.rejects(validateFrozenTesseractAssetsForTest({
+    executablePath: swapped.executable,
+    tessdataDir: swapped.tessdata,
+  }, async () => {
+      await rename(swapped.tessdata, displaced);
+      await symlink(outside, swapped.tessdata);
+    }), code("OCR_MODEL_INTEGRITY_FAILED"));
+  assert.equal(swapped.runner.invocations.length, 0);
+
+  const fileSwap = await setup(t);
+  const displacedFile = join(fileSwap.root, "displaced-eng");
+  await assert.rejects(validateFrozenTesseractAssetsForTest({
+    executablePath: fileSwap.executable,
+    tessdataDir: fileSwap.tessdata,
+  }, async () => {
+    await rename(fileSwap.engPath, displacedFile);
+    await writeFile(fileSwap.engPath, await readFile("/usr/share/tesseract-ocr/5/tessdata/eng.traineddata"));
+  }), code("OCR_MODEL_INTEGRITY_FAILED"));
+});
+
 test("unknown manifest fields and identity mutations fail closed", async (t) => {
   const { root } = await setup(t);
-  const bad = { ...manifest("binary", "eng-model", "osd-model"), extra: true };
-  assert.throws(() => new TesseractOcrProvider({
-    executablePath: join(root, "tesseract"), tessdataDir: join(root, "tessdata"),
-    manifest: bad as TesseractModelManifest, runner: new FixtureRunner(),
-  }), code("OCR_MODEL_INTEGRITY_FAILED"));
   const { provider } = await setup(t);
   assert.throws(() => Object.defineProperty(provider, "modelId", { value: "mutated" }));
-  let getterCalls = 0;
-  const hostile = manifest("binary", "eng-model", "osd-model") as unknown as Record<string, unknown>;
-  Object.defineProperty(hostile, "purpose", { enumerable: true, get() { getterCalls += 1; return "synthetic-english-eye-exam-ocr-smoke"; } });
   assert.throws(() => new TesseractOcrProvider({
     executablePath: join(root, "tesseract"), tessdataDir: join(root, "tessdata"),
-    manifest: hostile as unknown as TesseractModelManifest, runner: new FixtureRunner(),
-  }), code("OCR_MODEL_INTEGRITY_FAILED"));
-  assert.equal(getterCalls, 0);
+    runner: new FixtureRunner(), manifest: { arbitrary: true },
+  } as never), code("OCR_MODEL_UNAVAILABLE"));
+  assert.equal(Object.isFrozen(FROZEN_TESSERACT_MANIFEST), true);
+  assert.equal(FROZEN_TESSERACT_MANIFEST.minimumHardware, "x86_64 CPU; 512 MiB available memory");
+  assert.equal(FROZEN_TESSERACT_MANIFEST.offlinePackageReference, "clinic-os-tesseract-eng-v1");
+  let traps = 0;
+  const proxy = new Proxy({}, { ownKeys() { traps += 1; throw new Error("trap"); } });
+  assert.throws(() => new TesseractOcrProvider(proxy as never), code("OCR_MODEL_UNAVAILABLE"));
+  assert.equal(traps, 0);
+});
+
+test("direct Provider requires exact ActorContext and rejects proxies without traps", async (t) => {
+  const { provider, runner } = await setup(t);
+  for (const context of [
+    { ...CONTEXT, actorId: "" },
+    { ...CONTEXT, role: "PATIENT" },
+    { ...CONTEXT, extra: true },
+  ]) await assert.rejects(provider.infer(context as ActorContext, request()));
+  let traps = 0;
+  const hostileRequest = new Proxy(request(), { ownKeys() { traps += 1; throw new Error("trap"); } });
+  const hostileContext = new Proxy(CONTEXT, { ownKeys() { traps += 1; throw new Error("trap"); } });
+  await assert.rejects(provider.infer(CONTEXT, hostileRequest), code("OCR_INVALID_REQUEST"));
+  await assert.rejects(provider.infer(hostileContext, request()), code("OCR_INVALID_REQUEST"));
+  assert.equal(traps, 0);
+  assert.equal(runner.invocations.length, 0);
 });
 
 test("engine identity, process failure, timeout and output limits are sanitized", async (t) => {
@@ -220,6 +250,10 @@ test("malformed TSV and hostile confidence fail without OCR text disclosure", as
     "not tsv EYE EXAM REPORT",
     TSV_HEADER + row("EYE", 101),
     TSV_HEADER + row("EYE", Number.NaN),
+    TSV_HEADER + row("EYE", "0x10" as unknown as number),
+    TSV_HEADER + row("EYE", "1e2" as unknown as number),
+    TSV_HEADER + row("EYE", " 95" as unknown as number),
+    TSV_HEADER + row("EYE", "" as unknown as number),
     TSV_HEADER + row("EYE\0EXAM"),
   ]) {
     const { provider, runner } = await setup(t);
@@ -291,6 +325,77 @@ test("node runner fixes shell, environment and stdin and escalates TERM to KILL"
     timeoutMs: 1_000, maxOutputBytes: 1024, signal: controller.signal,
   }), (error) => error instanceof TesseractProcessFailure && error.code === "ABORTED");
   assert.equal(calls.length, 1);
+});
+
+test("node runner rejects after final KILL deadline when child never closes", async () => {
+  const signals: string[] = [];
+  let child!: EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill(signal: string): boolean };
+  const fakeSpawn = (() => {
+    child = new EventEmitter() as typeof child;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = (signal) => { signals.push(signal); return false; };
+    return child;
+  }) as unknown as Parameters<typeof createNodeTesseractProcessRunner>[0];
+  const started = Date.now();
+  await assert.rejects(createNodeTesseractProcessRunner(fakeSpawn).run({
+    executable: "/fixed/tesseract", args: ["stdin"], input: PNG,
+    timeoutMs: 5, maxOutputBytes: 1024,
+  }), (error) => error instanceof TesseractProcessFailure && error.code === "TIMEOUT");
+  assert.ok(Date.now() - started < 1_500);
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.stdin.listenerCount("error"), 0);
+
+  const thrownSignals: string[] = [];
+  const throwingSpawn = (() => {
+    const stuck = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill(signal: string): boolean;
+    };
+    stuck.stdin = new PassThrough();
+    stuck.stdout = new PassThrough();
+    stuck.stderr = new PassThrough();
+    stuck.kill = (signal) => { thrownSignals.push(signal); throw new Error("kill failed"); };
+    return stuck;
+  }) as unknown as Parameters<typeof createNodeTesseractProcessRunner>[0];
+  await assert.rejects(createNodeTesseractProcessRunner(throwingSpawn).run({
+    executable: "/fixed/tesseract", args: ["stdin"], input: PNG,
+    timeoutMs: 5, maxOutputBytes: 1024,
+  }), (error) => error instanceof TesseractProcessFailure && error.code === "TIMEOUT");
+  assert.deepEqual(thrownSignals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("node runner treats stdin errors and abort-listener race as controlled failures", async () => {
+  function spawning(mode: "stdin" | "abort") {
+    return (() => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill(signal: string): boolean;
+      };
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = () => { queueMicrotask(() => child.emit("close", null)); return true; };
+      if (mode === "stdin") queueMicrotask(() => child.stdin.emit("error", new Error("private")));
+      return child;
+    }) as unknown as Parameters<typeof createNodeTesseractProcessRunner>[0];
+  }
+  await assert.rejects(createNodeTesseractProcessRunner(spawning("stdin")).run({
+    executable: "/fixed/tesseract", args: ["stdin"], input: PNG,
+    timeoutMs: 1_000, maxOutputBytes: 1024,
+  }), (error) => error instanceof TesseractProcessFailure && error.code === "SPAWN_FAILED");
+
+  let reads = 0;
+  const racedSignal = {
+    get aborted() { reads += 1; return reads >= 2; },
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+  await assert.rejects(createNodeTesseractProcessRunner(spawning("abort")).run({
+    executable: "/fixed/tesseract", args: ["stdin"], input: PNG,
+    timeoutMs: 1_000, maxOutputBytes: 1024, signal: racedSignal,
+  }), (error) => error instanceof TesseractProcessFailure && error.code === "ABORTED");
+  assert.equal(reads, 2);
 });
 
 test("source contains no network, repository or domain-write authority", async () => {

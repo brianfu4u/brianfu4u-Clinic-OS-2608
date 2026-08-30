@@ -14,6 +14,7 @@ import type { ActorContext } from "../src/domain/contracts.ts";
 import type { RuntimeManifest } from "../src/runtime/contracts.ts";
 import { InferenceGateway } from "../src/runtime/inference-gateway.ts";
 import {
+  FROZEN_TESSERACT_MANIFEST,
   TESSERACT_OCR_MODEL_ID,
   TesseractOcrProvider,
   type TesseractModelManifest,
@@ -57,10 +58,10 @@ test("real local Tesseract English smoke passes bounded CER and every report mar
   const manifest = JSON.parse(
     await readFile(new URL("../models/tesseract-eng-v1.manifest.json", import.meta.url), "utf8"),
   ) as TesseractModelManifest;
+  assert.deepEqual(manifest, FROZEN_TESSERACT_MANIFEST);
   const provider = new TesseractOcrProvider({
     executablePath: process.env.WO021_TESSERACT_PATH ?? "/usr/bin/tesseract",
     tessdataDir: process.env.WO021_TESSDATA_DIR ?? "/usr/share/tesseract-ocr/5/tessdata",
-    manifest,
   });
   const objects = new ObjectStoreGateway(STRICT, new LocalObjectStore(root));
   const service = new StoredEvidenceExtractionService({

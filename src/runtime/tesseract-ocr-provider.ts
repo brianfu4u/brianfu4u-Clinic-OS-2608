@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import { spawn } from "node:child_process";
+import { types } from "node:util";
 
+import { assertActorContext } from "../domain/access-context.ts";
 import type { ActorContext } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
 import type { InferenceProvider, InferenceRequest, InferenceResponse } from "./contracts.ts";
@@ -15,12 +18,7 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const MAX_OCR_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 500;
-const MANIFEST_KEYS = [
-  "engTraineddataSha256", "engineName", "engineVersion", "executableSha256",
-  "language", "leptonicaVersion", "licenseSpdx", "manifestVersion", "minimumHardware",
-  "modelId", "offlinePackageReference", "osdTraineddataSha256", "purpose",
-  "rollbackModelId", "schemaVersion",
-];
+const FINAL_GRACE_MS = 500;
 
 export interface TesseractModelManifest {
   manifestVersion: string;
@@ -31,7 +29,7 @@ export interface TesseractModelManifest {
   purpose: string;
   executableSha256: string;
   engTraineddataSha256: string;
-  osdTraineddataSha256: string;
+  tsvConfigSha256: string;
   language: string;
   licenseSpdx: string;
   schemaVersion: string;
@@ -39,6 +37,24 @@ export interface TesseractModelManifest {
   rollbackModelId: string;
   offlinePackageReference: string;
 }
+
+export const FROZEN_TESSERACT_MANIFEST: Readonly<TesseractModelManifest> = Object.freeze({
+  manifestVersion: "tesseract-model-manifest-v1",
+  modelId: TESSERACT_OCR_MODEL_ID,
+  engineName: "tesseract",
+  engineVersion: "5.3.4",
+  leptonicaVersion: "1.82.0",
+  purpose: "synthetic-english-eye-exam-ocr-smoke",
+  executableSha256: "9f831cab7525c3dab04af41bda35182af7ea1df9dceeaaa2f3bf207ac45c06a5",
+  engTraineddataSha256: "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+  tsvConfigSha256: "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04",
+  language: "eng",
+  licenseSpdx: "Apache-2.0",
+  schemaVersion: TESSERACT_OCR_SCHEMA_VERSION,
+  minimumHardware: "x86_64 CPU; 512 MiB available memory",
+  rollbackModelId: "disabled",
+  offlinePackageReference: "clinic-os-tesseract-eng-v1",
+});
 
 export interface TesseractProcessInvocation {
   executable: string;
@@ -75,70 +91,121 @@ export function createNodeTesseractProcessRunner(
   return Object.freeze({
     run(invocation) {
       return new Promise((resolve, reject) => {
-      if (invocation.signal?.aborted) {
-        reject(new TesseractProcessFailure("ABORTED"));
-        return;
-      }
-      const child = spawnProcess(invocation.executable, [...invocation.args], {
-        shell: false,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { LANG: "C", LC_ALL: "C" },
-      });
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
-      let outputBytes = 0;
-      let failure: TesseractProcessFailure | null = null;
-      let killTimer: NodeJS.Timeout | undefined;
-      let settled = false;
-
-      const stop = (reason: TesseractProcessFailure) => {
-        if (failure) return;
-        failure = reason;
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
-        killTimer.unref();
-      };
-      const abort = () => stop(new TesseractProcessFailure("ABORTED"));
-      invocation.signal?.addEventListener("abort", abort, { once: true });
-      const collect = (target: Buffer[]) => (chunk: Buffer) => {
-        outputBytes += chunk.byteLength;
-        if (outputBytes > invocation.maxOutputBytes) {
-          stop(new TesseractProcessFailure("OUTPUT_LIMIT"));
+        if (invocation.signal?.aborted) {
+          reject(new TesseractProcessFailure("ABORTED"));
           return;
         }
-        target.push(Buffer.from(chunk));
-      };
-      child.stdout.on("data", collect(stdout));
-      child.stderr.on("data", collect(stderr));
-      child.on("error", () => {
-        failure ??= new TesseractProcessFailure("SPAWN_FAILED");
-      });
-      const timeout = setTimeout(
-        () => stop(new TesseractProcessFailure("TIMEOUT")),
-        invocation.timeoutMs,
-      );
-      timeout.unref();
-      child.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (killTimer) clearTimeout(killTimer);
-        invocation.signal?.removeEventListener("abort", abort);
-        if (failure) reject(failure);
-        else resolve({
-          exitCode: code ?? -1,
-          stdout: new Uint8Array(Buffer.concat(stdout)),
-          stderr: new Uint8Array(Buffer.concat(stderr)),
-        });
-      });
-      child.stdin.on("error", () => undefined);
-      child.stdin.end(Buffer.from(invocation.input));
+        let child: ReturnType<typeof spawn>;
+        try {
+          child = spawnProcess(invocation.executable, [...invocation.args], {
+            shell: false,
+            stdio: ["pipe", "pipe", "pipe"],
+            env: { LANG: "C", LC_ALL: "C" },
+          });
+        } catch {
+          reject(new TesseractProcessFailure("SPAWN_FAILED"));
+          return;
+        }
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
+        let outputBytes = 0;
+        let failure: TesseractProcessFailure | null = null;
+        let settled = false;
+        let killTimer: NodeJS.Timeout | undefined;
+        let finalTimer: NodeJS.Timeout | undefined;
+
+        const abort = () => stop(new TesseractProcessFailure("ABORTED"));
+        const onError = () => stop(new TesseractProcessFailure("SPAWN_FAILED"));
+        const onStdinError = () => stop(new TesseractProcessFailure("SPAWN_FAILED"));
+        const onStdout = (chunk: Buffer) => collect(stdout, chunk);
+        const onStderr = (chunk: Buffer) => collect(stderr, chunk);
+        const onClose = (code: number | null) => finish(code);
+        const timeout = setTimeout(
+          () => stop(new TesseractProcessFailure("TIMEOUT")),
+          invocation.timeoutMs,
+        );
+        timeout.unref();
+
+        const cleanup = () => {
+          clearTimeout(timeout);
+          if (killTimer) clearTimeout(killTimer);
+          if (finalTimer) clearTimeout(finalTimer);
+          invocation.signal?.removeEventListener("abort", abort);
+          child.stdout.off("data", onStdout);
+          child.stderr.off("data", onStderr);
+          child.stdin.off("error", onStdinError);
+          child.off("error", onError);
+          child.off("close", onClose);
+        };
+        const rejectFailure = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(failure ?? new TesseractProcessFailure("SPAWN_FAILED"));
+        };
+        function finish(code: number | null) {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (failure) reject(failure);
+          else resolve({
+            exitCode: code ?? -1,
+            stdout: new Uint8Array(Buffer.concat(stdout)),
+            stderr: new Uint8Array(Buffer.concat(stderr)),
+          });
+        }
+        function stop(reason: TesseractProcessFailure) {
+          if (failure || settled) return;
+          failure = reason;
+          try { child.kill("SIGTERM"); } catch { /* final KILL still follows */ }
+          killTimer = setTimeout(() => {
+            try { child.kill("SIGKILL"); } catch { /* final deadline rejects */ }
+            finalTimer = setTimeout(rejectFailure, FINAL_GRACE_MS);
+            finalTimer.unref();
+          }, KILL_GRACE_MS);
+          killTimer.unref();
+        }
+        function collect(target: Buffer[], chunk: Buffer) {
+          if (failure || settled) return;
+          outputBytes += chunk.byteLength;
+          if (outputBytes > invocation.maxOutputBytes) {
+            stop(new TesseractProcessFailure("OUTPUT_LIMIT"));
+            return;
+          }
+          target.push(Buffer.from(chunk));
+        }
+
+        child.stdout.on("data", onStdout);
+        child.stderr.on("data", onStderr);
+        child.stdin.on("error", onStdinError);
+        child.on("error", onError);
+        child.on("close", onClose);
+        invocation.signal?.addEventListener("abort", abort, { once: true });
+        if (invocation.signal?.aborted) abort();
+        if (!failure && !settled) {
+          try { child.stdin.end(Buffer.from(invocation.input)); } catch { onStdinError(); }
+        }
       });
     },
   });
 }
 
 export const nodeTesseractProcessRunner = createNodeTesseractProcessRunner();
+
+interface TrustedPath {
+  path: string;
+  handle: FileHandle;
+  dev: number;
+  ino: number;
+}
+
+interface ProviderConfig {
+  executablePath: string;
+  tessdataDir: string;
+  runner?: TesseractProcessRunner;
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+}
 
 export class TesseractOcrProvider implements InferenceProvider {
   readonly #executablePath: string;
@@ -148,22 +215,17 @@ export class TesseractOcrProvider implements InferenceProvider {
   readonly #timeoutMs: number;
   readonly #abortSignal: AbortSignal | undefined;
 
-  constructor(config: {
-    executablePath: string;
-    tessdataDir: string;
-    manifest: TesseractModelManifest;
-    runner?: TesseractProcessRunner;
-    timeoutMs?: number;
-    abortSignal?: AbortSignal;
-  }) {
-    if (!config || !isAbsolute(config.executablePath) || !isAbsolute(config.tessdataDir) ||
+  constructor(config: ProviderConfig) {
+    if (!plainDataObject(config) ||
+      !allowedKeys(config, ["abortSignal", "executablePath", "runner", "tessdataDir", "timeoutMs"]) ||
+      !isAbsolute(config.executablePath) || !isAbsolute(config.tessdataDir) ||
       (config.timeoutMs !== undefined && (!Number.isSafeInteger(config.timeoutMs) ||
         config.timeoutMs < 100 || config.timeoutMs > 120_000)) ||
       (config.runner !== undefined && typeof config.runner.run !== "function") ||
       (config.abortSignal !== undefined && !(config.abortSignal instanceof AbortSignal))) {
       throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR configuration is invalid.");
     }
-    this.#manifest = validateManifest(captureManifest(config.manifest));
+    this.#manifest = FROZEN_TESSERACT_MANIFEST;
     this.#executablePath = config.executablePath;
     this.#tessdataDir = config.tessdataDir;
     this.#runner = config.runner ?? nodeTesseractProcessRunner;
@@ -182,45 +244,30 @@ export class TesseractOcrProvider implements InferenceProvider {
 
   async infer(context: ActorContext, request: InferenceRequest): Promise<InferenceResponse> {
     const captured = captureRequest(context, request);
-    await this.#validateAssets();
-    const version = await this.#run(["--version"], new Uint8Array(), 64 * 1024);
-    validateEngineVersion(version, this.#manifest);
-    const result = await this.#run([
-      "stdin", "stdout", "--tessdata-dir", this.#tessdataDir,
-      "-l", "eng", "--psm", "6", "tsv",
-    ], captured.input.bytes, MAX_OCR_BYTES);
-    if (result.exitCode !== 0) {
-      throw new DomainError("OCR_EXECUTION_FAILED", "Local OCR execution failed.");
-    }
-    const candidate = parseTsv(result.stdout);
-    return {
-      requestId: captured.requestId,
-      providerKind: "LOCAL_MODEL",
-      modelId: this.modelId,
-      schemaVersion: captured.schemaVersion,
-      output: candidate,
-      completedAt: new Date().toISOString(),
-    };
-  }
-
-  async #validateAssets(): Promise<void> {
-    const assets = [
-      [this.#executablePath, this.#manifest.executableSha256],
-      [join(this.#tessdataDir, "eng.traineddata"), this.#manifest.engTraineddataSha256],
-      [join(this.#tessdataDir, "osd.traineddata"), this.#manifest.osdTraineddataSha256],
-    ] as const;
+    const trusted = await openTrustedAssets(this.#executablePath, this.#tessdataDir, this.#manifest);
     try {
-      for (const [path, expected] of assets) {
-        const metadata = await lstat(path);
-        if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error();
-        const actual = createHash("sha256").update(await readFile(path)).digest("hex");
-        if (actual !== expected) {
-          throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset integrity failed.");
-        }
+      await assertPathBindings(trusted);
+      const version = await this.#run(["--version"], new Uint8Array(), 64 * 1024);
+      validateEngineVersion(version, this.#manifest);
+      await assertPathBindings(trusted);
+      const result = await this.#run([
+        "stdin", "stdout", "--tessdata-dir", this.#tessdataDir,
+        "-l", "eng", "--psm", "6", "tsv",
+      ], captured.input.bytes, MAX_OCR_BYTES);
+      if (result.exitCode !== 0) {
+        throw new DomainError("OCR_EXECUTION_FAILED", "Local OCR execution failed.");
       }
-    } catch (error) {
-      if (error instanceof DomainError) throw error;
-      throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR assets are unavailable.");
+      const candidate = parseTsv(result.stdout);
+      return {
+        requestId: captured.requestId,
+        providerKind: "LOCAL_MODEL",
+        modelId: this.modelId,
+        schemaVersion: captured.schemaVersion,
+        output: candidate,
+        completedAt: new Date().toISOString(),
+      };
+    } finally {
+      await Promise.allSettled(trusted.map(({ handle }) => handle.close()));
     }
   }
 
@@ -263,35 +310,103 @@ export class TesseractOcrProvider implements InferenceProvider {
   }
 }
 
-function captureManifest(value: TesseractModelManifest): TesseractModelManifest {
-  if (!plainDataObject(value)) {
-    throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR manifest is invalid.");
-  }
+async function openTrustedPath(
+  path: string,
+  directory: boolean,
+  expectedSha256?: string,
+): Promise<TrustedPath> {
+  if (typeof constants.O_NOFOLLOW !== "number" ||
+    (directory && typeof constants.O_DIRECTORY !== "number")) throw new Error();
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW |
+    (directory ? constants.O_DIRECTORY : 0));
   try {
-    return structuredClone(Object.fromEntries(
-      Object.entries(Object.getOwnPropertyDescriptors(value))
-        .map(([key, descriptor]) => [key, descriptor.value]),
-    )) as TesseractModelManifest;
-  } catch {
-    throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR manifest is invalid.");
+    const stat = await handle.stat();
+    assertTrustedOwnership(stat, directory);
+    if (directory ? !stat.isDirectory() : !stat.isFile()) throw new Error();
+    if (expectedSha256 !== undefined) {
+      const actual = createHash("sha256").update(await handle.readFile()).digest("hex");
+      if (actual !== expectedSha256) {
+        throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset integrity failed.");
+      }
+    }
+    const pathStat = await lstat(path);
+    if (pathStat.isSymbolicLink() || pathStat.dev !== stat.dev || pathStat.ino !== stat.ino) {
+      throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset identity changed.");
+    }
+    if (directory) {
+      const resolved = await realpath(path);
+      const resolvedStat = await lstat(resolved);
+      if (resolvedStat.isSymbolicLink() || resolvedStat.dev !== stat.dev || resolvedStat.ino !== stat.ino) {
+        throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR directory identity changed.");
+      }
+    }
+    return { path, handle, dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
   }
 }
 
-function validateManifest(value: TesseractModelManifest): Readonly<TesseractModelManifest> {
-  if (!plainDataObject(value) || Object.keys(value).length !== MANIFEST_KEYS.length ||
-    Object.keys(value).some((key) => !MANIFEST_KEYS.includes(key)) ||
-    value.manifestVersion !== "tesseract-model-manifest-v1" ||
-    value.modelId !== TESSERACT_OCR_MODEL_ID || value.engineName !== "tesseract" ||
-    value.engineVersion !== "5.3.4" || value.leptonicaVersion !== "1.82.0" ||
-    value.purpose !== "synthetic-english-eye-exam-ocr-smoke" || value.language !== "eng" ||
-    value.licenseSpdx !== "Apache-2.0" || value.schemaVersion !== TESSERACT_OCR_SCHEMA_VERSION ||
-    value.rollbackModelId !== "disabled" ||
-    !nonblank(value.minimumHardware) || !nonblank(value.offlinePackageReference) ||
-    ![value.executableSha256, value.engTraineddataSha256, value.osdTraineddataSha256]
-      .every((hash) => /^[a-f0-9]{64}$/.test(hash))) {
-    throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR manifest is invalid.");
+async function openTrustedAssets(
+  executablePath: string,
+  tessdataDir: string,
+  manifest: Readonly<TesseractModelManifest>,
+): Promise<TrustedPath[]> {
+  const opened: TrustedPath[] = [];
+  const files = [
+    [executablePath, manifest.executableSha256],
+    [join(tessdataDir, "eng.traineddata"), manifest.engTraineddataSha256],
+    [join(tessdataDir, "configs", "tsv"), manifest.tsvConfigSha256],
+  ] as const;
+  try {
+    for (const path of [dirname(executablePath), tessdataDir, join(tessdataDir, "configs")]) {
+      opened.push(await openTrustedPath(path, true));
+    }
+    for (const [path, expected] of files) opened.push(await openTrustedPath(path, false, expected));
+    return opened;
+  } catch (error) {
+    await Promise.allSettled(opened.map(({ handle }) => handle.close()));
+    if (error instanceof DomainError) throw error;
+    throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR assets are unavailable.");
   }
-  return Object.freeze({ ...value });
+}
+
+export async function validateFrozenTesseractAssetsForTest(
+  config: { executablePath: string; tessdataDir: string },
+  afterOpen: () => void | Promise<void>,
+): Promise<void> {
+  const trusted = await openTrustedAssets(
+    config.executablePath,
+    config.tessdataDir,
+    FROZEN_TESSERACT_MANIFEST,
+  );
+  try {
+    await afterOpen();
+    await assertPathBindings(trusted);
+  } finally {
+    await Promise.allSettled(trusted.map(({ handle }) => handle.close()));
+  }
+}
+
+async function assertPathBindings(paths: readonly TrustedPath[]): Promise<void> {
+  try {
+    for (const trusted of paths) {
+      const [handleStat, pathStat] = await Promise.all([trusted.handle.stat(), lstat(trusted.path)]);
+      if (pathStat.isSymbolicLink() || handleStat.dev !== trusted.dev || handleStat.ino !== trusted.ino ||
+        pathStat.dev !== trusted.dev || pathStat.ino !== trusted.ino) throw new Error();
+      assertTrustedOwnership(handleStat, handleStat.isDirectory());
+    }
+  } catch {
+    throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset identity changed.");
+  }
+}
+
+function assertTrustedOwnership(stat: Stats, directory: boolean): void {
+  const currentUid = process.geteuid?.();
+  if (currentUid === undefined || (stat.uid !== 0 && stat.uid !== currentUid) ||
+    (stat.mode & 0o022) !== 0 || (directory ? !stat.isDirectory() : !stat.isFile())) {
+    throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset permissions are unsafe.");
+  }
 }
 
 function captureRequest(context: ActorContext, request: InferenceRequest): {
@@ -312,6 +427,7 @@ function captureRequest(context: ActorContext, request: InferenceRequest): {
     !/^[a-f0-9]{64}$/.test(request.input.contentSha256 as string)) {
     throw new DomainError("OCR_INVALID_REQUEST", "Local OCR request is invalid.");
   }
+  assertActorContext({ clinicId: context.clinicId, actorId: context.actorId, role: context.role });
   const bytes = new Uint8Array(request.input.bytes);
   const mediaType = request.input.mediaType as string;
   if (!validMagic(bytes, mediaType) ||
@@ -352,6 +468,9 @@ function parseTsv(bytes: Uint8Array): Record<string, unknown> {
     const columns = line.split("\t");
     if (columns.length !== 12 || columns.slice(0, 10).some((value) => !/^\d+$/.test(value))) {
       throw new DomainError("OCR_INVALID_OUTPUT", "Local OCR returned invalid output.");
+    }
+    if (!/^(?:-1|(?:0|[1-9]\d?)(?:\.\d+)?|100(?:\.0+)?)$/.test(columns[10])) {
+      throw new DomainError("OCR_INVALID_OUTPUT", "Local OCR returned invalid confidence.");
     }
     const confidence = Number(columns[10]);
     if (!Number.isFinite(confidence) || confidence < -1 || confidence > 100) {
@@ -403,8 +522,14 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }
 
+function allowedKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.includes("executablePath") && actual.includes("tessdataDir") &&
+    actual.every((key) => keys.includes(key));
+}
+
 function plainDataObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value === null || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) return false;
   const descriptors = Object.getOwnPropertyDescriptors(value);
