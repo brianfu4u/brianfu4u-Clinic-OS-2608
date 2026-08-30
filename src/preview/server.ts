@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, isAbsolute, resolve } from "node:path";
 import { join } from "node:path";
-import { chmod, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { access, chmod, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -29,8 +28,13 @@ import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
 import { InferenceGateway } from "../runtime/inference-gateway.ts";
 import type { RuntimeManifest } from "../runtime/contracts.ts";
 import {
-  TESSERACT_MODEL_MANIFEST_SHA256,
-  TESSERACT_OCR_MODEL_ID,
+  getStartupPrivateValues,
+  LOCAL_OCR_STARTUP_SPEC,
+  validateStartupConfig,
+  type StartupConfig,
+} from "../runtime/startup-config.ts";
+import { StartupReadiness } from "../runtime/readiness.ts";
+import {
   TesseractOcrProvider,
   validateTesseractAssetPathChainSync,
   validateTesseractCheckedInManifestSync,
@@ -72,6 +76,8 @@ export function createPreviewServer(options: {
   extractionOperationTimeoutMs?: number;
   uploadBodyTimeoutMs?: number;
   evidenceObjectIngestion?: EvidenceObjectIngestionService;
+  startupConfig?: StartupConfig;
+  readiness?: StartupReadiness;
 } = {}) {
   const employeeContext = options.employeeContext ?? {
     clinicId: "demo-clinic",
@@ -92,6 +98,8 @@ export function createPreviewServer(options: {
   const bodyTimeoutMs = boundedTimeout(options.extractionBodyTimeoutMs, DEFAULT_BODY_TIMEOUT_MS);
   const operationTimeoutMs = boundedTimeout(options.extractionOperationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
   const uploadBodyTimeoutMs = boundedTimeout(options.uploadBodyTimeoutMs, DEFAULT_UPLOAD_BODY_TIMEOUT_MS);
+  const startupConfig = options.startupConfig;
+  const readiness = options.readiness ?? (startupConfig ? new StartupReadiness(startupConfig) : undefined);
 
   return createServer(async (request, response) => {
     try {
@@ -107,6 +115,8 @@ export function createPreviewServer(options: {
         operationTimeoutMs,
         uploadBodyTimeoutMs,
         options.evidenceObjectIngestion,
+        startupConfig,
+        readiness,
       );
     } catch (error) {
       if (error instanceof DomainError) {
@@ -119,38 +129,25 @@ export function createPreviewServer(options: {
 }
 
 export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.env) {
-  const mode = env.PREVIEW_MODE ?? "synthetic";
-  if (mode === "synthetic") return createPreviewServer();
-  if (mode !== "postgres") throw new Error("INVALID_PREVIEW_MODE");
-  if (!env.DATABASE_URL?.trim()) throw new Error("DATABASE_URL_REQUIRED");
-  const objectStoreRoot = requiredAbsolutePath(
-    env.PREVIEW_OBJECT_STORE_ROOT ?? env.LOCAL_OBJECT_STORE_ROOT ?? env.OBJECT_STORE_ROOT,
-    "OBJECT_STORE_ROOT_REQUIRED",
-  );
-  const executablePath = requiredAbsolutePath(env.WO021_TESSERACT_PATH, "TESSERACT_PATH_REQUIRED");
-  const tessdataDir = requiredAbsolutePath(env.WO021_TESSDATA_DIR, "TESSDATA_DIR_REQUIRED");
-  validateTesseractCheckedInManifestSync(TESSERACT_MANIFEST_FILE);
-  validateTesseractAssetPathChainSync({ executablePath, tessdataDir });
-  const pool = createNodePgPool(env.DATABASE_URL);
-  const runtime: RuntimeManifest = {
-    profile: "ON_PREM_STRICT",
-    databaseProvider: "LOCAL_POSTGRES",
-    fileProvider: "LOCAL_OBJECT_STORE",
-    inferenceProvider: "LOCAL_MODEL",
-    backupProvider: "LOCAL_ENCRYPTED_BACKUP",
-    externalInferenceAuthorized: false,
-    manifestVersion: "preview-postgres-local-v1",
-  };
+  const startupConfig = validateStartupConfig(env);
+  if (startupConfig.mode === "SYNTHETIC_PREVIEW") return createPreviewServer({ startupConfig });
+  const manifest = startupConfig.manifest!;
+  const privateValues = getStartupPrivateValues(startupConfig);
+  // Cloud and non-local-inference declarations are valid configuration snapshots,
+  // but this ticket deliberately has no cloud/private adapters to construct.
+  if (manifest.profile === "CLOUD" || manifest.inferenceProvider !== "LOCAL_MODEL") {
+    return createPreviewServer({ startupConfig, readiness: new StartupReadiness(startupConfig) });
+  }
+  const pool = createNodePgPool(privateValues.databaseUrl!);
+  const runtime: RuntimeManifest = manifest;
   const spec = {
     ...EYE_EXAM_EXTRACTION_SPEC,
-    parserVersion: "tesseract-eng-parser-v1",
-    modelId: TESSERACT_OCR_MODEL_ID,
-    modelManifestSha256: TESSERACT_MODEL_MANIFEST_SHA256,
+    ...LOCAL_OCR_STARTUP_SPEC,
   } as const;
-  const objects = new ObjectStoreGateway(runtime, new LocalObjectStore(objectStoreRoot));
+  const objects = new ObjectStoreGateway(runtime, new LocalObjectStore(privateValues.objectStoreRoot!));
   const inference = new InferenceGateway(runtime, new TesseractOcrProvider({
-    executablePath,
-    tessdataDir,
+    executablePath: privateValues.tesseractPath!,
+    tessdataDir: privateValues.tessdataDir!,
   }));
   const capture = new CaptureRepository(pool);
   const persistedPath = new PersistedGoldenPath({
@@ -165,6 +162,20 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
     goldenPath: persistedPath,
   });
   const server = createPreviewServer({
+    startupConfig,
+    readiness: new StartupReadiness(startupConfig, {
+      database: async () => {
+        const connection = await pool.connect();
+        try { await connection.query("SELECT 1"); return true; } finally { connection.release(); }
+      },
+      objectStore: async () => { await access(privateValues.objectStoreRoot!); return true; },
+      ocrManifest: async () => {
+        validateTesseractCheckedInManifestSync(TESSERACT_MANIFEST_FILE);
+        validateTesseractAssetPathChainSync({ executablePath: privateValues.tesseractPath!, tessdataDir: privateValues.tessdataDir! });
+        return true;
+      },
+      inferenceCapability: async () => true,
+    }),
     clinicalBackend: new PostgresClinicalPreviewBackend(pool, {
       extractionGoldenPath: extractionPath,
       objectIngestion: new EvidenceObjectIngestionService(objects),
@@ -172,15 +183,6 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   });
   server.once("close", () => { void pool.close(); });
   return server;
-}
-
-function requiredAbsolutePath(value: string | undefined, code: string): string {
-  if (!value?.trim()) throw new Error(code);
-  const path = value.trim();
-  if (!isAbsolute(path) || resolve(path) !== path || dirname(path) === path) {
-    throw new Error(`${code}:INVALID_ABSOLUTE_PATH`);
-  }
-  return path;
 }
 
 async function route(
@@ -195,10 +197,41 @@ async function route(
   operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS,
   uploadBodyTimeoutMs = DEFAULT_UPLOAD_BODY_TIMEOUT_MS,
   evidenceObjectIngestion?: EvidenceObjectIngestionService,
+  startupConfig?: StartupConfig,
+  readiness?: StartupReadiness,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const path = url.pathname;
+
+  if (method === "GET" && path === "/api/health") {
+    // Liveness is deliberately independent of all dependency probes.
+    if (startupConfig) {
+      sendJson(response, 200, { status: "ok", profile: startupConfig.snapshot.profile });
+    } else {
+      sendJson(response, 200, clinicalBackend
+        ? {
+            status: "ok",
+            mode: "hybrid-postgres-preview",
+            persistent: ["clinical-chain", "manager-decisions"],
+            volatile: ["employee-status", "topics", "conversation", "browser-continuation"],
+          }
+        : { status: "ok", mode: "synthetic-local-preview" });
+    }
+    return;
+  }
+  if (method === "GET" && path === "/api/readiness") {
+    const result = readiness
+      ? await readiness.evaluate()
+      : { status: "not_ready" as const, profile: "SYNTHETIC_PREVIEW" as const,
+          checks: [{ name: "clinical_runtime", status: "not_ready" as const, code: "SYNTHETIC_PREVIEW" }] };
+    sendJson(response, result.status === "ready" ? 200 : 503, result);
+    return;
+  }
+  if (startupConfig?.mode === "CONFIGURED" && !clinicalBackend && path.startsWith("/api/")) {
+    sendJson(response, 503, { error: "CLOUD_PROVIDER_UNAVAILABLE", message: "Configured clinical adapters are unavailable." });
+    return;
+  }
 
   if (path === EXTRACTION_PATH) {
     if (method !== "POST") {
@@ -248,17 +281,6 @@ async function route(
   if (method === "GET" && asset) {
     const file = fileURLToPath(new URL(asset.file, import.meta.url));
     send(response, 200, asset.type, await readFile(file));
-    return;
-  }
-  if (method === "GET" && path === "/api/health") {
-    sendJson(response, 200, clinicalBackend
-      ? {
-          status: "ok",
-          mode: "hybrid-postgres-preview",
-          persistent: ["clinical-chain", "manager-decisions"],
-          volatile: ["employee-status", "topics", "conversation", "browser-continuation"],
-        }
-      : { status: "ok", mode: "synthetic-local-preview" });
     return;
   }
   if (method === "GET" && path === "/api/employee/bootstrap") {
@@ -1075,7 +1097,10 @@ function send(
 
 if (import.meta.main) {
   const host = process.env.PREVIEW_HOST ?? "127.0.0.1";
-  const port = Number(process.env.PREVIEW_PORT ?? 3000);
+  // Validate the same explicit environment used by the server. PORT is the
+  // only supported listen-port setting; legacy PREVIEW_PORT is intentionally
+  // not consumed by configured startup.
+  const port = validateStartupConfig(process.env).port;
   const server = createConfiguredPreviewServer();
   server.listen(port, host, () => {
     console.log(`Employee: http://${host}:${port}/employee`);

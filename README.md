@@ -10,33 +10,48 @@ employee report -> Artifact -> EvidenceFactCard -> Workflow -> Expectation -> ma
 manager decision -> immutable ledger -> authoritative Workflow transition
 ```
 
-Requirements: Node.js 24 or newer.
+Requirements: Node.js 24 or newer. The browser-only synthetic preview is explicit:
 
 ```bash
 npm test
 npm run demo
-npm run preview
+PREVIEW_MODE=synthetic npm run preview
 ```
 
 Open `http://127.0.0.1:3000/employee` for the employee preview or
 `http://127.0.0.1:3000/manager` for the manager preview. The implementation
 uses in-memory synthetic data by default and is not a production application.
 
-To run the persisted local preview against an already migrated PostgreSQL database,
-configure all local extraction dependencies explicitly:
+To run the configured On-Prem Strict preview against an already migrated PostgreSQL database,
+configure all canonical local extraction dependencies explicitly:
 
 ```bash
-PREVIEW_MODE=postgres \
+CLINIC_OS_PROFILE=ON_PREM_STRICT \
 DATABASE_URL='postgresql://...' \
-PREVIEW_OBJECT_STORE_ROOT='/var/lib/clinic-os/objects' \
+CLINIC_OS_DATABASE_PROVIDER=LOCAL_POSTGRES \
+CLINIC_OS_FILE_PROVIDER=LOCAL_OBJECT_STORE \
+CLINIC_OS_INFERENCE_PROVIDER=LOCAL_MODEL \
+CLINIC_OS_BACKUP_PROVIDER=LOCAL_ENCRYPTED_BACKUP \
+CLINIC_OS_EXTERNAL_INFERENCE_AUTHORIZED=false \
+CLINIC_OS_MANIFEST_VERSION='on-prem-v1' \
+CLINIC_OS_OBJECT_STORE_ROOT='/var/lib/clinic-os/objects' \
 WO021_TESSERACT_PATH='/usr/bin/tesseract' \
 WO021_TESSDATA_DIR='/usr/share/tesseract-ocr/5/tessdata' \
+CLINIC_OS_INFERENCE_CAPABILITIES=EXTRACT_EYE_EXAM_REPORT \
 npm run preview
 ```
 
 This startup path does not run migrations. A missing database URL, local object-store root,
 or OCR path fails startup and never falls back to the in-memory clinical backend. The persisted
 extraction route is therefore never advertised by a server that only has a database pool.
+
+`GET /api/health` confirms only that the HTTP process is alive. `GET /api/readiness` is the
+dependency gate; it returns bounded stable codes and `503` until every selected adapter is ready.
+Cloud declarations are validated but deliberately return `CLOUD_PROVIDER_UNAVAILABLE` in this
+repository: cloud providers have not yet been implemented. No URL, credential, endpoint, or local
+path is included in either response. Legacy `PREVIEW_MODE=postgres` and its old object-root names
+are accepted only as an explicit temporary compatibility path; they never fill a missing canonical
+setting. See [WO-027](docs/work-orders/WO-027-startup-profile-readiness.md).
 
 ## PostgreSQL acceptance boundary
 
