@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -11,12 +11,14 @@ import {
   type ExtractionSpec,
 } from "../src/application/evidence-extraction.ts";
 import type { ActorContext } from "../src/domain/contracts.ts";
+import { DomainError } from "../src/domain/errors.ts";
 import type { RuntimeManifest } from "../src/runtime/contracts.ts";
 import { InferenceGateway } from "../src/runtime/inference-gateway.ts";
 import {
   FROZEN_TESSERACT_MANIFEST,
   TESSERACT_OCR_MODEL_ID,
   TesseractOcrProvider,
+  validateTesseractAssetPathChain,
   type TesseractModelManifest,
 } from "../src/runtime/tesseract-ocr-provider.ts";
 import { LocalObjectStore } from "../src/storage/local-object-store.ts";
@@ -64,9 +66,10 @@ test("real local Tesseract English smoke passes bounded CER and every report mar
     tessdataDir: process.env.WO021_TESSDATA_DIR ?? "/usr/share/tesseract-ocr/5/tessdata",
   });
   const objects = new ObjectStoreGateway(STRICT, new LocalObjectStore(root));
+  const inference = new InferenceGateway(STRICT, provider);
   const service = new StoredEvidenceExtractionService({
     objects,
-    inference: new InferenceGateway(STRICT, provider),
+    inference,
     spec: SPEC,
   });
 
@@ -99,6 +102,37 @@ test("real local Tesseract English smoke passes bounded CER and every report mar
     assert.ok(characterErrorRate(normalize(sample.expected), actual) <= 0.02,
       `synthetic English CER exceeded 2% for sample ${index}`);
   }
+  assert.doesNotMatch(JSON.stringify(inference.listReceipts(CONTEXT)), /VISUAL ACUITY|RIGHT EYE NORMAL|137,80,78|tessdata/);
+});
+
+test("frozen asset path chain rejects writable, mutated and symlinked deployment assets", async (t) => {
+  const root = await mkdtemp(join(homedir(), "clinic-os-ocr-assets-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = join(root, "bin");
+  const tessdata = join(root, "tessdata");
+  const configs = join(tessdata, "configs");
+  await mkdir(bin, { mode: 0o700 });
+  await mkdir(configs, { recursive: true, mode: 0o700 });
+  const executablePath = join(bin, "tesseract");
+  const eng = join(tessdata, "eng.traineddata");
+  const tsv = join(configs, "tsv");
+  await writeFile(executablePath, await readFile("/usr/bin/tesseract"), { mode: 0o755 });
+  await writeFile(eng, await readFile("/usr/share/tesseract-ocr/5/tessdata/eng.traineddata"), { mode: 0o644 });
+  await writeFile(tsv, await readFile("/usr/share/tesseract-ocr/5/tessdata/configs/tsv"), { mode: 0o644 });
+  await validateTesseractAssetPathChain({ executablePath, tessdataDir: tessdata });
+
+  await chmod(tessdata, 0o777);
+  await assert.rejects(validateTesseractAssetPathChain({ executablePath, tessdataDir: tessdata }),
+    (error: unknown) => error instanceof DomainError && error.code === "OCR_MODEL_INTEGRITY_FAILED");
+  await chmod(tessdata, 0o700);
+  await writeFile(eng, "mutated");
+  await assert.rejects(validateTesseractAssetPathChain({ executablePath, tessdataDir: tessdata }),
+    (error: unknown) => error instanceof DomainError && error.code === "OCR_MODEL_INTEGRITY_FAILED");
+  await writeFile(eng, await readFile("/usr/share/tesseract-ocr/5/tessdata/eng.traineddata"), { mode: 0o644 });
+
+  const linked = join(root, "linked-tessdata");
+  await symlink(tessdata, linked);
+  await assert.rejects(validateTesseractAssetPathChain({ executablePath, tessdataDir: linked }));
 });
 
 function normalize(value: string): string {
