@@ -315,10 +315,23 @@ test("missing or rewritten patient identity fails closed", async () => {
     );
 
     const valid = capture("clinic-a", "artifact-b", "fact-b");
-    await seedCapture(pool, valid);
     await pool.db.query(
-      "UPDATE evidence_fact_card SET identity_anchor = 'PAT-REWRITTEN' WHERE clinic_id = $1 AND id = $2",
-      ["clinic-a", "fact-b"],
+      `INSERT INTO artifact
+       (id,clinic_id,kind,occurred_at,occurred_at_source,source_employee_id,identity_anchor,payload,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [valid.artifact.id, valid.artifact.clinicId, valid.artifact.kind, valid.artifact.occurredAt,
+        valid.artifact.occurredAtSource, valid.artifact.sourceEmployeeId, valid.artifact.identityAnchor,
+        valid.artifact.payload, valid.artifact.createdAt],
+    );
+    await pool.db.query(
+      `INSERT INTO evidence_fact_card
+       (id,clinic_id,artifact_id,subject_type,identity_anchor,workflow_family,occurred_at,fields,
+        missing_fields,confidence,parser_version,lineage_artifact_ids)
+       VALUES ($1,$2,$3,$4,'PAT-REWRITTEN',$5,$6,$7,$8,$9,$10,$11)`,
+      [valid.factCard.id, valid.factCard.clinicId, valid.factCard.artifactId, valid.factCard.subjectType,
+        valid.factCard.workflowFamily, valid.factCard.occurredAt, valid.factCard.fields,
+        valid.factCard.missingFields, valid.factCard.confidence, valid.factCard.parserVersion,
+        valid.factCard.lineageArtifactIds],
     );
     await assert.rejects(
       repository.attachCapture(actor(), "artifact-b", "fact-b", ATTACHED_AT),

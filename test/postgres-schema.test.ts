@@ -26,6 +26,9 @@ const migrationSql = await readFile(
 ) + await readFile(
   new URL("../src/persistence/migrations/0005_manager_decision_saga.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0006_extraction_lineage.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -100,12 +103,14 @@ test("fresh migration creates the required tables", async () => {
       result.rows.map(({ tablename }) => tablename),
       [
         "artifact",
+        "evidence_extraction_attempt",
         "evidence_fact_card",
         "expectation",
         "expectation_transition",
         "manager_decision",
         "s2_verification",
         "schema_migration",
+        "stored_object_ref",
         "workflow",
         "workflow_artifact_link",
       ],
@@ -126,11 +131,12 @@ test("identical migration rerun is a no-op", async () => {
         "0003_expectation_reevaluation",
         "0004_s2_verification",
         "0005_manager_decision_saga",
+        "0006_extraction_lineage",
       ],
     );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 5);
+    assert.equal(ledger.rows.length, 6);
   } finally {
     await db.close();
   }
@@ -484,6 +490,8 @@ test("every business table enables and forces RLS with USING and WITH CHECK", as
   try {
     const tables = [
       "artifact",
+      "stored_object_ref",
+      "evidence_extraction_attempt",
       "evidence_fact_card",
       "workflow",
       "workflow_artifact_link",

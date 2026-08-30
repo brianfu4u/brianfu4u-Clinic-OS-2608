@@ -104,7 +104,7 @@ export class CaptureRepository {
   }
 }
 
-function validateCapture(
+export function validateCapture(
   context: ActorContext,
   artifact: Artifact,
   factCard: EvidenceFactCard,
@@ -122,7 +122,7 @@ function validateCapture(
   assertFactCardIdentitySource(factCard, artifact);
 }
 
-async function findArtifact(
+export async function findArtifact(
   client: TenantQueryClient,
   clinicId: string,
   artifactId: string,
@@ -134,7 +134,7 @@ async function findArtifact(
   return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
 }
 
-async function findFactCard(
+export async function findFactCard(
   client: TenantQueryClient,
   clinicId: string,
   factCardId: string,
@@ -146,7 +146,7 @@ async function findFactCard(
   return result.rows[0] ? factCardFromRow(result.rows[0]) : null;
 }
 
-async function insertArtifact(
+export async function insertArtifact(
   client: TenantQueryClient,
   clinicId: string,
   artifact: Artifact,
@@ -168,7 +168,7 @@ async function insertArtifact(
   );
 }
 
-async function insertFactCard(
+export async function insertFactCard(
   client: TenantQueryClient,
   clinicId: string,
   factCard: EvidenceFactCard,
@@ -229,14 +229,14 @@ function timestamp(value: Date | string | null): string | null {
   return value instanceof Date ? value.toISOString() : value;
 }
 
-function artifactEqual(left: Artifact, right: Artifact): boolean {
+export function artifactEqual(left: Artifact, right: Artifact): boolean {
   return semanticEqual(
     { ...left, occurredAt: instant(left.occurredAt), createdAt: instant(left.createdAt) },
     { ...right, occurredAt: instant(right.occurredAt), createdAt: instant(right.createdAt) },
   );
 }
 
-function factCardEqual(left: EvidenceFactCard, right: EvidenceFactCard): boolean {
+export function factCardEqual(left: EvidenceFactCard, right: EvidenceFactCard): boolean {
   return semanticEqual(
     { ...left, occurredAt: instant(left.occurredAt) },
     { ...right, occurredAt: instant(right.occurredAt) },
@@ -249,7 +249,7 @@ function instant(value: string | null): number | string | null {
   return Number.isNaN(parsed) ? value : parsed;
 }
 
-function semanticEqual(left: unknown, right: unknown): boolean {
+export function semanticEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 

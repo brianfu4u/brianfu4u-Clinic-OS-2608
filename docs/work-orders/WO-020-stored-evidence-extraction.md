@@ -70,7 +70,7 @@ Artifact payload is assembled as `{ storedObjectRef }`. FactCard clinic, Artifac
 occurred time and lineage inherit exactly from the Artifact. The service, not the model, assigns
 FactCard ID and parser version. Existing identity gates must be reused.
 
-Inference lineage contains request/provider/model/capability/schema/policy/completion time and object
+Inference lineage contains request/provider/model/model-manifest/capability/schema/policy/parser/completion time and object
 content hash, but no bytes, filesystem path, model output or identity anchor. This ticket does not
 claim that lineage is durable until later persistence wiring.
 

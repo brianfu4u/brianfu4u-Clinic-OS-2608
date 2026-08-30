@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Pool } from "pg";
 import { DueExpectationBatch } from "../src/application/due-expectation-batch.ts";
+import { EYE_EXAM_EXTRACTION_SPEC, type StoredEvidenceExtractionResult } from "../src/application/evidence-extraction.ts";
 import { PersistedGoldenPath } from "../src/application/persisted-golden-path.ts";
 import type { ActorContext, Artifact, EvidenceFactCard } from "../src/domain/contracts.ts";
 import { CaptureRepository } from "../src/persistence/capture-repository.ts";
 import { ExpectationRepository } from "../src/persistence/expectation-repository.ts";
+import { ExtractionPersistenceRepository } from "../src/persistence/extraction-persistence-repository.ts";
 import { ManagerDecisionRepository } from "../src/persistence/manager-decision-repository.ts";
 import { createNodePgPool } from "../src/persistence/node-pg-pool.ts";
 import { VerificationRepository } from "../src/persistence/verification-repository.ts";
@@ -86,6 +88,9 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     assert.equal((await capture.getArtifact(employee, first.artifact.id))?.identityAnchor, "WO018-P-1");
     assert.equal(await tenantCount(sourceApp, "WO018-B", "artifact"), 0);
     await assert.rejects(tenantInsertForeignClinic(sourceApp));
+    const extractions = new ExtractionPersistenceRepository(sourceProductPool);
+    const extractionA = extraction("WO018-A");
+    await extractions.saveExtraction(employee, extractionA.objectRef, extractionA.result);
     throwIfAborted(cancellationController.signal);
 
     progress("CONCURRENCY");
@@ -167,6 +172,8 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     const employeeB = actor("WO018-B", "EMPLOYEE");
     const managerB = actor("WO018-B", "MANAGER");
     const completeB = await createCompletedChain(golden, employeeB, "WO018-B-close");
+    const extractionB = extraction("WO018-B");
+    await extractions.saveExtraction(employeeB, extractionB.objectRef, extractionB.result);
     await decisions.recordManagerDecision(managerB, {
       id: "WO018-B-decision", expectationId: completeB.expectationId, action: "CLOSE_STANDARD",
       reasonCode: null, note: null, decidedAt: "2026-08-30T10:10:00.000Z",
@@ -242,6 +249,45 @@ function capturePair(id: string, identityAnchor: string, occurredAt: string, kin
       missingFields: [], confidence: 1, parserVersion: "WO018", lineageArtifactIds: [id],
     },
   };
+}
+
+function extraction(clinicId: string): { objectRef: import("../src/storage/contracts.ts").StoredObjectRef; result: StoredEvidenceExtractionResult } {
+  const suffix = clinicId === "WO018-A" ? "A" : "B";
+  const objectRef = {
+    clinicId, objectId: `WO018-object-${suffix}`, contentSha256: suffix.toLowerCase().repeat(64),
+    sizeBytes: 100, mediaType: "image/png",
+  };
+  const artifactId = `WO018-extraction-artifact-${suffix}`;
+  const factCardId = `WO018-extraction-fact-${suffix}`;
+  return { objectRef, result: {
+    status: "READY",
+    artifact: {
+      id: artifactId, clinicId, kind: "EXAM_REPORT", occurredAt: "2026-08-30T08:00:00.000Z",
+      occurredAtSource: "source", sourceEmployeeId: "WO018-employee", identityAnchor: `WO018-P-${suffix}`,
+      payload: { storedObjectRef: objectRef }, createdAt: "2026-08-30T08:00:01.000Z",
+    },
+    factCard: {
+      id: factCardId, clinicId, artifactId, subjectType: "PATIENT", identityAnchor: `WO018-P-${suffix}`,
+      workflowFamily: "EYE_EXAM", occurredAt: "2026-08-30T08:00:00.000Z",
+      fields: { reportType: "EYE_EXAM" }, missingFields: [], confidence: 1,
+      parserVersion: EYE_EXAM_EXTRACTION_SPEC.parserVersion, lineageArtifactIds: [artifactId],
+    },
+    candidate: {
+      subjectTypeCandidate: "PATIENT", workflowFamilyCandidate: "EYE_EXAM",
+      fields: { reportType: "EYE_EXAM" }, missingFields: [], confidence: 1,
+    },
+    reasonCodes: [],
+    lineage: {
+      requestId: `WO018-extraction-${suffix}`, providerKind: "LOCAL_MODEL",
+      modelId: EYE_EXAM_EXTRACTION_SPEC.modelId,
+      modelManifestSha256: EYE_EXAM_EXTRACTION_SPEC.modelManifestSha256,
+      capability: EYE_EXAM_EXTRACTION_SPEC.capability,
+      schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion,
+      policyVersion: EYE_EXAM_EXTRACTION_SPEC.policyVersion,
+      parserVersion: EYE_EXAM_EXTRACTION_SPEC.parserVersion,
+      completedAt: "2026-08-30T08:00:02.000Z", objectContentSha256: objectRef.contentSha256,
+    },
+  } };
 }
 
 function goldenPath(pool: ReturnType<typeof createNodePgPool>): PersistedGoldenPath {

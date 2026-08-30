@@ -21,7 +21,7 @@ const CANDIDATE_KEYS = [
 const REF_KEYS = ["clinicId", "contentSha256", "mediaType", "objectId", "sizeBytes"];
 const SPEC_KEYS = [
   "allowedMediaTypes", "artifactKind", "capability", "minimumConfidence", "parserVersion",
-  "policyVersion", "providerKind", "modelId", "requiredFields", "schemaVersion", "subjectType",
+  "policyVersion", "providerKind", "modelId", "modelManifestSha256", "requiredFields", "schemaVersion", "subjectType",
   "workflowFamily",
 ];
 const RESPONSE_KEYS = [
@@ -56,6 +56,7 @@ export interface ExtractionSpec {
   minimumConfidence: number;
   providerKind: InferenceResponse["providerKind"];
   modelId: string;
+  modelManifestSha256: string;
 }
 
 export const EYE_EXAM_EXTRACTION_SPEC: Readonly<ExtractionSpec> = Object.freeze({
@@ -71,6 +72,7 @@ export const EYE_EXAM_EXTRACTION_SPEC: Readonly<ExtractionSpec> = Object.freeze(
   minimumConfidence: 0.8,
   providerKind: "LOCAL_MODEL",
   modelId: "deterministic-local-fixture",
+  modelManifestSha256: "a80e69f3d4cf77067b0867b75d16ab6fc9b9f68c0caa65f6883923c70ca9cc16",
 });
 
 export interface StoredEvidenceExtractionCommand {
@@ -97,9 +99,11 @@ export interface ExtractionLineage {
   requestId: string;
   providerKind: InferenceResponse["providerKind"];
   modelId: string;
+  modelManifestSha256: string;
   capability: string;
   schemaVersion: string;
   policyVersion: string;
+  parserVersion: string;
   completedAt: string;
   objectContentSha256: string;
 }
@@ -138,7 +142,7 @@ export class StoredEvidenceExtractionService {
     }
     this.#objects = dependencies.objects;
     this.#inference = dependencies.inference;
-    this.#spec = validateSpec(structuredClone(dependencies.spec ?? EYE_EXAM_EXTRACTION_SPEC));
+    this.#spec = validateExtractionSpec(structuredClone(dependencies.spec ?? EYE_EXAM_EXTRACTION_SPEC));
   }
 
   async extract(
@@ -188,9 +192,11 @@ export class StoredEvidenceExtractionService {
       requestId: response.requestId,
       providerKind: response.providerKind,
       modelId: response.modelId,
+      modelManifestSha256: this.#spec.modelManifestSha256,
       capability: this.#spec.capability,
       schemaVersion: response.schemaVersion,
       policyVersion: this.#spec.policyVersion,
+      parserVersion: this.#spec.parserVersion,
       completedAt: response.completedAt,
       objectContentSha256: stored.ref.contentSha256,
     };
@@ -235,7 +241,7 @@ export class StoredEvidenceExtractionService {
   }
 }
 
-function validateSpec(spec: ExtractionSpec): ExtractionSpec {
+export function validateExtractionSpec(spec: ExtractionSpec): ExtractionSpec {
   exactObject(spec, SPEC_KEYS, "INVALID_EXTRACTION_SPEC");
   if (!nonblank(spec.capability) || !nonblank(spec.schemaVersion) ||
     !nonblank(spec.policyVersion) || !nonblank(spec.parserVersion) ||
@@ -247,7 +253,8 @@ function validateSpec(spec: ExtractionSpec): ExtractionSpec {
     spec.requiredFields.some((field) => !nonblank(field)) ||
     new Set(spec.requiredFields).size !== spec.requiredFields.length ||
     !Number.isFinite(spec.minimumConfidence) || spec.minimumConfidence < 0 ||
-    spec.minimumConfidence > 1 || spec.providerKind !== "LOCAL_MODEL" || !nonblank(spec.modelId)) {
+    spec.minimumConfidence > 1 || spec.providerKind !== "LOCAL_MODEL" || !nonblank(spec.modelId) ||
+    !/^[a-f0-9]{64}$/.test(spec.modelManifestSha256)) {
     throw new DomainError("INVALID_EXTRACTION_SPEC", "Extraction specification is invalid.");
   }
   return Object.freeze({
@@ -339,6 +346,13 @@ function validateCandidate(output: unknown, spec: ExtractionSpec): ExtractionCan
     fields: structuredClone(candidate.fields),
     missingFields: Object.freeze([...derivedMissing]) as unknown as string[],
   });
+}
+
+export function validateExtractionCandidateBoundary(
+  value: unknown,
+  spec: ExtractionSpec = EYE_EXAM_EXTRACTION_SPEC,
+): ExtractionCandidate {
+  return structuredClone(validateCandidate(value, spec));
 }
 
 function validateInferenceResponse(

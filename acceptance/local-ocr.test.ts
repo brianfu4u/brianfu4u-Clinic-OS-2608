@@ -16,6 +16,7 @@ import type { RuntimeManifest } from "../src/runtime/contracts.ts";
 import { InferenceGateway } from "../src/runtime/inference-gateway.ts";
 import {
   FROZEN_TESSERACT_MANIFEST,
+  TESSERACT_MODEL_MANIFEST_SHA256,
   TESSERACT_OCR_MODEL_ID,
   TesseractOcrProvider,
   validateTesseractAssetPathChain,
@@ -38,6 +39,7 @@ const SPEC: ExtractionSpec = {
   ...EYE_EXAM_EXTRACTION_SPEC,
   parserVersion: "tesseract-eng-parser-v1",
   modelId: TESSERACT_OCR_MODEL_ID,
+  modelManifestSha256: TESSERACT_MODEL_MANIFEST_SHA256,
 };
 const SAMPLES = [
   {
@@ -57,9 +59,9 @@ const SAMPLES = [
 test("real local Tesseract English smoke passes bounded CER and every report marker", { timeout: 120_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "clinic-os-real-ocr-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const manifest = JSON.parse(
-    await readFile(new URL("../models/tesseract-eng-v1.manifest.json", import.meta.url), "utf8"),
-  ) as TesseractModelManifest;
+  const manifestBytes = await readFile(new URL("../models/tesseract-eng-v1.manifest.json", import.meta.url));
+  assert.equal(createHash("sha256").update(manifestBytes).digest("hex"), TESSERACT_MODEL_MANIFEST_SHA256);
+  const manifest = JSON.parse(manifestBytes.toString("utf8")) as TesseractModelManifest;
   assert.deepEqual(manifest, FROZEN_TESSERACT_MANIFEST);
   const provider = new TesseractOcrProvider({
     executablePath: process.env.WO021_TESSERACT_PATH ?? "/usr/bin/tesseract",

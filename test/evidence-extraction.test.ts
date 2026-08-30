@@ -127,9 +127,11 @@ test("stored object round trip returns exact inherited Artifact, FactCard and li
     requestId: "extract-1",
     providerKind: "LOCAL_MODEL",
     modelId: provider.modelId,
+    modelManifestSha256: EYE_EXAM_EXTRACTION_SPEC.modelManifestSha256,
     capability: EYE_EXAM_EXTRACTION_SPEC.capability,
     schemaVersion: EYE_EXAM_EXTRACTION_SPEC.schemaVersion,
     policyVersion: EYE_EXAM_EXTRACTION_SPEC.policyVersion,
+    parserVersion: EYE_EXAM_EXTRACTION_SPEC.parserVersion,
     completedAt: "2026-08-30T12:00:00.000Z",
     objectContentSha256: ref.contentSha256,
   });
@@ -359,8 +361,8 @@ test("lineage exposes no bytes, path, model output or identity", async (t) => {
   const { ref, service } = await setup(t);
   const result = await service.extract(CONTEXT, command(ref));
   assert.deepEqual(Object.keys(result.lineage).sort(), [
-    "capability", "completedAt", "modelId", "objectContentSha256", "policyVersion",
-    "providerKind", "requestId", "schemaVersion",
+    "capability", "completedAt", "modelId", "modelManifestSha256", "objectContentSha256",
+    "parserVersion", "policyVersion", "providerKind", "requestId", "schemaVersion",
   ]);
   assert.doesNotMatch(JSON.stringify(result.lineage), /PATIENT|report-7|bytes|path/i);
 });

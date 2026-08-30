@@ -9,7 +9,9 @@ import { Pool, type PoolClient } from "pg";
 import { applyMigrations, loadRepositoryMigrations } from "../src/persistence/migration-runner.ts";
 
 export const BUSINESS_TABLES = [
+  "stored_object_ref",
   "artifact",
+  "evidence_extraction_attempt",
   "evidence_fact_card",
   "workflow",
   "workflow_artifact_link",
@@ -221,7 +223,7 @@ export async function grantApplicationAccess(admin: Pool, appUrl: string): Promi
   const appRole = decodeURIComponent(new URL(appUrl).username);
   await admin.query(`GRANT USAGE ON SCHEMA public TO ${quoteIdentifier(appRole)}`);
   const role = quoteIdentifier(appRole);
-  await admin.query(`GRANT SELECT, INSERT ON TABLE artifact, evidence_fact_card,
+  await admin.query(`GRANT SELECT, INSERT ON TABLE stored_object_ref, artifact, evidence_extraction_attempt, evidence_fact_card,
     workflow_artifact_link, expectation_transition, s2_verification, manager_decision TO ${role}`);
   await admin.query(`GRANT SELECT, INSERT, UPDATE ON TABLE workflow, expectation TO ${role}`);
 }
@@ -261,6 +263,9 @@ export async function assertRlsCatalog(admin: Pool): Promise<void> {
 export async function assertAppendOnlyTriggers(admin: Pool): Promise<void> {
   const required = [
     "artifact",
+    "stored_object_ref",
+    "evidence_extraction_attempt",
+    "evidence_fact_card",
     "workflow_artifact_link",
     "expectation_transition",
     "s2_verification",
@@ -460,7 +465,8 @@ export async function assertTenantIsolationForEveryTable(admin: Pool, app: Pool)
 
 export async function assertAppendOnlyBehavior(admin: Pool): Promise<void> {
   for (const table of [
-    "artifact", "workflow_artifact_link", "expectation_transition", "s2_verification", "manager_decision",
+    "stored_object_ref", "artifact", "evidence_extraction_attempt", "evidence_fact_card",
+    "workflow_artifact_link", "expectation_transition", "s2_verification", "manager_decision",
   ]) {
     await assert.rejects(admin.query(
       `UPDATE ${quoteIdentifier(table)} SET clinic_id=clinic_id WHERE clinic_id='WO018-A'`,

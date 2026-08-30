@@ -12,6 +12,7 @@ import type { InferenceProvider, InferenceRequest, InferenceResponse } from "./c
 
 export const TESSERACT_OCR_MODEL_ID = "tesseract-eng-eye-exam-v1";
 export const TESSERACT_OCR_SCHEMA_VERSION = "eye-exam-candidate-v1";
+export const TESSERACT_MODEL_MANIFEST_SHA256 = "8ccd734c69eb6dc4ce8f78ee1aa5cf66c39a2e92b544bebd2fa088aa34162951";
 
 const CAPABILITY = "EXTRACT_EYE_EXAM_REPORT";
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;

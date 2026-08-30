@@ -26,6 +26,8 @@ approved de-identified clinical-language validation set passes its frozen thresh
 - Tesseract license: Apache-2.0;
 - current executable SHA-256:
   `9f831cab7525c3dab04af41bda35182af7ea1df9dceeaaa2f3bf207ac45c06a5`;
+- checked-in model-manifest SHA-256:
+  `8ccd734c69eb6dc4ce8f78ee1aa5cf66c39a2e92b544bebd2fa088aa34162951`;
 - `eng.traineddata` SHA-256:
   `7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2`;
 - `osd.traineddata` is present in the executor but is not an invoked or trusted Provider asset.
