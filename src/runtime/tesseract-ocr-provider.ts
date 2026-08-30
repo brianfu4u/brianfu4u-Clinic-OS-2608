@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  type Stats,
+} from "node:fs";
 import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -384,20 +393,110 @@ async function openTrustedAssets(
 export async function validateTesseractAssetPathChain(
   config: { executablePath: string; tessdataDir: string },
 ): Promise<void> {
+  validateTesseractAssetPathChainSync(config);
+}
+
+/**
+ * Synchronous startup gate for callers whose construction contract is synchronous.
+ * It uses the same frozen manifest and the same path/ownership/hash rules as the
+ * per-inference async gate. This is intentionally limited to startup validation;
+ * the provider still revalidates assets immediately before and after each OCR call.
+ */
+export function validateTesseractAssetPathChainSync(
+  config: { executablePath: string; tessdataDir: string },
+): void {
   if (!plainDataObject(config) || !exactKeys(config, ["executablePath", "tessdataDir"]) ||
     !isAbsolute(config.executablePath) || !isAbsolute(config.tessdataDir) ||
     resolve(config.executablePath) !== config.executablePath || resolve(config.tessdataDir) !== config.tessdataDir) {
     throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR configuration is invalid.");
   }
-  const trusted = await openTrustedAssets(
-    config.executablePath,
-    config.tessdataDir,
-    FROZEN_TESSERACT_MANIFEST,
-  );
+  const opened: number[] = [];
   try {
-    await assertAssetState(trusted);
+    const directories = new Set<string>();
+    for (const leaf of [dirname(config.executablePath), config.tessdataDir, join(config.tessdataDir, "configs")]) {
+      for (const path of directoryAncestry(leaf)) directories.add(path);
+    }
+    for (const path of directories) opened.push(openTrustedPathSync(path, true));
+    const files = [
+      [config.executablePath, FROZEN_TESSERACT_MANIFEST.executableSha256],
+      [join(config.tessdataDir, "eng.traineddata"), FROZEN_TESSERACT_MANIFEST.engTraineddataSha256],
+      [join(config.tessdataDir, "configs", "tsv"), FROZEN_TESSERACT_MANIFEST.tsvConfigSha256],
+    ] as const;
+    for (const [path, expected] of files) opened.push(openTrustedPathSync(path, false, expected));
+    assertAssetStateSync(opened, files);
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR assets are unavailable.");
   } finally {
-    await Promise.allSettled(trusted.map(({ handle }) => handle.close()));
+    for (const fd of opened) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
+function openTrustedPathSync(path: string, directory: boolean, expectedSha256?: string): number {
+  if (typeof constants.O_NOFOLLOW !== "number" ||
+    (directory && typeof constants.O_DIRECTORY !== "number")) throw new Error();
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW |
+    (directory ? constants.O_DIRECTORY : 0));
+  try {
+    const stat = fstatSync(fd);
+    assertTrustedOwnership(stat, directory);
+    if (directory ? !stat.isDirectory() : !stat.isFile()) throw new Error();
+    if (expectedSha256 !== undefined && hashFdSync(fd, stat) !== expectedSha256) {
+      throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset integrity failed.");
+    }
+    const pathStat = lstatSync(path);
+    if (pathStat.isSymbolicLink() || pathStat.dev !== stat.dev || pathStat.ino !== stat.ino) {
+      throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset identity changed.");
+    }
+    if (directory) {
+      const resolved = realpathSync(path);
+      const resolvedStat = lstatSync(resolved);
+      if (resolvedStat.isSymbolicLink() || resolvedStat.dev !== stat.dev || resolvedStat.ino !== stat.ino) {
+        throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR directory identity changed.");
+      }
+    }
+    return fd;
+  } catch (error) {
+    try { closeSync(fd); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
+function hashFdSync(fd: number, stat: Stats): string {
+  if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 64 * 1024 * 1024) throw new Error();
+  const buffer = Buffer.allocUnsafe(stat.size);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) throw new Error();
+    offset += bytesRead;
+  }
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function assertAssetStateSync(
+  fds: readonly number[],
+  files: readonly (readonly [string, string])[],
+): void {
+  // The startup gate has no long-lived handles after this function returns, but
+  // repeat the identity/hash checks after all opens to close replacement races
+  // between the first check and the completed startup validation.
+  for (const fd of fds) {
+    const stat = fstatSync(fd);
+    assertTrustedOwnership(stat, stat.isDirectory());
+  }
+  for (const [path, expected] of files) {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      const pathStat = lstatSync(path);
+      if (pathStat.isSymbolicLink() || stat.dev !== pathStat.dev || stat.ino !== pathStat.ino ||
+        !stat.isFile() || hashFdSync(fd, stat) !== expected) {
+        throw new DomainError("OCR_MODEL_INTEGRITY_FAILED", "Local OCR asset identity changed.");
+      }
+    } finally { closeSync(fd); }
   }
 }
 

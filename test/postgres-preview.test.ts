@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
-import { readFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 
 import type { ActorContext } from "../src/domain/contracts.ts";
@@ -303,6 +305,46 @@ test("explicit postgres startup profile requires configuration and never falls b
   assert.throws(
     () => createConfiguredPreviewServer({ PREVIEW_MODE: "unknown" }),
     /INVALID_PREVIEW_MODE/,
+  );
+});
+
+test("configured postgres startup validates all frozen OCR assets before creating the pool", async (t) => {
+  const env = {
+    PREVIEW_MODE: "postgres",
+    DATABASE_URL: "postgresql://localhost/clinic",
+    PREVIEW_OBJECT_STORE_ROOT: "/var/lib/clinic-os/objects",
+    WO021_TESSERACT_PATH: "/var/lib/clinic-os/tesseract",
+    WO021_TESSDATA_DIR: "/var/lib/clinic-os/tessdata",
+  };
+  assert.throws(
+    () => createConfiguredPreviewServer(env),
+    (error) => error instanceof Error && (error as Error & { code?: string }).code === "OCR_MODEL_UNAVAILABLE",
+  );
+
+  const sourceExecutable = process.env.WO021_TESSERACT_PATH ?? "/usr/bin/tesseract";
+  const sourceTessdata = process.env.WO021_TESSDATA_DIR ?? "/usr/share/tesseract-ocr/5/tessdata";
+  const root = await mkdtemp(join(tmpdir(), "clinic-os-preview-ocr-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tessdata = join(root, "tessdata");
+  const configs = join(tessdata, "configs");
+  const executable = join(root, "tesseract");
+  await mkdir(configs, { recursive: true });
+  try {
+    await copyFile(sourceExecutable, executable);
+    await copyFile(join(sourceTessdata, "eng.traineddata"), join(tessdata, "eng.traineddata"));
+    await copyFile(join(sourceTessdata, "configs", "tsv"), join(configs, "tsv"));
+  } catch {
+    t.skip("real frozen Tesseract assets are not installed in this environment");
+    return;
+  }
+  await writeFile(join(configs, "tsv"), "changed", { flag: "w" });
+  assert.throws(
+    () => createConfiguredPreviewServer({
+      ...env,
+      WO021_TESSERACT_PATH: executable,
+      WO021_TESSDATA_DIR: tessdata,
+    }),
+    (error) => error instanceof Error && (error as Error & { code?: string }).code === "OCR_MODEL_INTEGRITY_FAILED",
   );
 });
 

@@ -26,6 +26,7 @@ import {
   TESSERACT_MODEL_MANIFEST_SHA256,
   TESSERACT_OCR_MODEL_ID,
   TesseractOcrProvider,
+  validateTesseractAssetPathChainSync,
 } from "../runtime/tesseract-ocr-provider.ts";
 import { LocalObjectStore } from "../storage/local-object-store.ts";
 import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
@@ -110,6 +111,7 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   );
   const executablePath = requiredAbsolutePath(env.WO021_TESSERACT_PATH, "TESSERACT_PATH_REQUIRED");
   const tessdataDir = requiredAbsolutePath(env.WO021_TESSDATA_DIR, "TESSDATA_DIR_REQUIRED");
+  validateTesseractAssetPathChainSync({ executablePath, tessdataDir });
   const pool = createNodePgPool(env.DATABASE_URL);
   const runtime: RuntimeManifest = {
     profile: "ON_PREM_STRICT",
