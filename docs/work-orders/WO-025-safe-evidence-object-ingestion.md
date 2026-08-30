@@ -1,6 +1,6 @@
 # WO-025 — Safe Employee Evidence-Object Ingestion
 
-**Status:** Architecture frozen / Builder ready  
+**Status:** Accepted — Architecture Review passed 2026-08-30  
 **Architect:** Codex Architecture Designer  
 **Depends on:** Constitution, WO-005, WO-019, WO-020, WO-022, WO-023, WO-024  
 **Repository:** `brianfu4u/brianfu4u-Clinic-OS-2608`
@@ -324,3 +324,17 @@ The independent review must inspect implementation, not only tests, for:
 - synthetic preview fail-closed behavior and existing LocalObjectStore root trust;
 - detached bounded response and unchanged WO-024 extraction contract;
 - no manager raw-object read surface or hidden migration/dependency/queue scope.
+
+## Architecture acceptance
+
+Accepted after commit `cb66e14` and independent review.
+
+- Full regression: 329/329.
+- Upload focused checks: 7/7 reported by Builder; multipart HTTP boundary suite passed.
+- Domain and Runtime demos: passed.
+- Local Tesseract acceptance: 2/2 passed.
+- Real PostgreSQL acceptance: intentionally fail-closed with `ENVIRONMENT_REQUIRED` because no
+  PostgreSQL server configuration is present.
+- Temporary upload directories/files are cleaned on success, failure, timeout and disconnect;
+  server-derived object references remain the only returned authority.
+- GitHub push remains deferred for the batch release.
