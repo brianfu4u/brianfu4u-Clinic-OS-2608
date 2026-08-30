@@ -1,6 +1,6 @@
 # WO-017 — Tenant-Scoped Due Expectation Batch
 
-**Status:** FROZEN
+**Status:** ACCEPTED
 **Architect:** Codex Architecture Designer
 **Builder:** delegated Codex Builder
 **Depends on:** WO-001 through WO-016 accepted locally through `7f7609c`
@@ -105,3 +105,17 @@ git diff --check
 ```
 
 Builder commits `feat(application): process due expectations` and does not push before Architecture Review.
+
+## 9. Architecture acceptance
+
+Accepted on 2026-08-30 through `444442f` after independent review.
+
+- 244/244 tests, 10/10 targeted batch tests and both demos pass.
+- Candidate selection, per-item re-evaluation and S2 persistence execute in one bounded tenant transaction.
+- `(due_at,id)` keyset ordering, bound values and `FOR UPDATE OF e SKIP LOCKED` preserve the intended concurrent-worker contract.
+- Each item uses a loop-index-only SAVEPOINT; a controlled DomainError rolls back that item and continues, while an unexpected database failure rolls back the page.
+- Manager authority and tenant context fail closed before business acquisition; failure output contains only controlled IDs/codes.
+- Same-time replay is idempotent, and fresh-cursor runs can retry items skipped by a prior page cursor after failure.
+- Existing public repository behavior remains unchanged; no migration, dependency, worker, scheduler or HTTP mutation was added.
+
+Real PostgreSQL two-worker `SKIP LOCKED` interleaving remains a deployment acceptance gate and is not claimed by the PGlite harness.
