@@ -77,3 +77,13 @@ It advances a bounded keyset page inside one transaction and isolates controlled
 with loop-index savepoints before persisting S2. `nextCursor` advances past every selected row,
 including failed rows; retry failed rows with a later run starting from a null cursor. Because
 locked rows may be skipped, the command does not claim `hasMore` or real-server worker parity.
+
+Real PostgreSQL deployment acceptance is intentionally separate from ordinary tests:
+
+```bash
+npm run accept:postgres-real
+```
+
+The command requires four explicit dedicated-database URLs and PostgreSQL 16/17 client binaries.
+It is destructive, fails non-zero when its environment is absent, and never reports a skipped gate
+as success. See `docs/runbooks/postgres-real-acceptance.md` before running it.

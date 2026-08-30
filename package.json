@@ -11,7 +11,8 @@
     "demo": "node src/domain/golden-path.ts",
     "runtime:demo": "node src/runtime/runtime-demo.ts",
     "preview": "node src/preview/server.ts",
-    "db:migrate": "node src/persistence/node-pg-client.ts"
+    "db:migrate": "node src/persistence/node-pg-client.ts",
+    "accept:postgres-real": "node --test acceptance/real-postgres.test.ts"
   },
   "dependencies": {
     "pg": "8.23.0"
