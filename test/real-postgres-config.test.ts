@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
-  AcceptanceError, assertDatabaseIdentities, loadConfig, resetPublicSchema,
+  AcceptanceError, assertDatabaseIdentities, installSignalCancellation, loadConfig,
+  resetPublicSchema, runBinary,
 } from "../acceptance/real-postgres.ts";
 
 function hasCode(code: string) {
@@ -71,4 +73,30 @@ test("public schema reset commits atomically and rolls back failures", async () 
     "SET statement_timeout = '15s'", "SET lock_timeout = '3s'", "BEGIN",
     "DROP SCHEMA public CASCADE", "CREATE SCHEMA public", "ROLLBACK",
   ]);
+});
+
+test("signal coordination aborts once and removes listeners without exiting", () => {
+  const emitter = new EventEmitter();
+  const controller = new AbortController();
+  const cancellation = installSignalCancellation(controller, emitter);
+  emitter.emit("SIGTERM");
+  emitter.emit("SIGINT");
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(cancellation.exitCode, 143);
+  cancellation.dispose();
+  assert.equal(emitter.listenerCount("SIGTERM"), 0);
+  assert.equal(emitter.listenerCount("SIGINT"), 0);
+});
+
+test("binary runner kills and awaits children on abort and timeout", async () => {
+  const url = "postgresql://unused:unused@localhost/unused";
+  const controller = new AbortController();
+  const aborted = runBinary(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], url,
+    controller.signal, 5_000);
+  controller.abort();
+  await assert.rejects(aborted, hasCode("POSTGRES_BINARY_ABORTED"));
+  await assert.rejects(
+    runBinary(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], url, undefined, 20),
+    hasCode("POSTGRES_BINARY_TIMEOUT"),
+  );
 });

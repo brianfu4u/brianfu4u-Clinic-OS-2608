@@ -25,18 +25,23 @@ import {
   catalogDigest,
   dumpAndRestore,
   grantApplicationAccess,
+  installSignalCancellation,
   loadConfig,
   logicalDigests,
   migrate,
   resetPublicSchema,
+  throwIfAborted,
   userFromUrl,
 } from "./real-postgres.ts";
 
 test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
+  const cancellationController = new AbortController();
+  const cancellation = installSignalCancellation(cancellationController);
   let config;
   try {
     config = loadConfig();
   } catch (error) {
+    cancellation.dispose();
     console.error(`[WO018][FAIL] ${error instanceof AcceptanceError ? error.code : "ENVIRONMENT_INVALID"}`);
     throw error;
   }
@@ -52,8 +57,9 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
   let failure: unknown;
   try {
     progress("PREFLIGHT");
+    throwIfAborted(cancellationController.signal);
     const serverVersions = await assertDatabaseIdentities(sourceAdmin, sourceApp, restoreAdmin, restoreApp);
-    await assertBinaries([serverVersions.sourceMajor, serverVersions.restoreMajor]);
+    await assertBinaries([serverVersions.sourceMajor, serverVersions.restoreMajor], cancellationController.signal);
     await assertDedicatedEmptyPublic(sourceAdmin);
     await assertDedicatedEmptyPublic(restoreAdmin);
     await assertConnectedRolesDiffer(sourceAdmin, sourceApp);
@@ -66,8 +72,10 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     await resetPublicSchema(sourceAdmin);
     await migrate(sourceAdmin);
     await grantApplicationAccess(sourceAdmin, config.sourceApp);
+    throwIfAborted(cancellationController.signal);
 
     progress("RLS");
+    throwIfAborted(cancellationController.signal);
     await assertRlsCatalog(sourceAdmin);
     await assertAppendOnlyTriggers(sourceAdmin);
     await assertNoTenantLeak(sourceApp);
@@ -78,8 +86,10 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     assert.equal((await capture.getArtifact(employee, first.artifact.id))?.identityAnchor, "WO018-P-1");
     assert.equal(await tenantCount(sourceApp, "WO018-B", "artifact"), 0);
     await assert.rejects(tenantInsertForeignClinic(sourceApp));
+    throwIfAborted(cancellationController.signal);
 
     progress("CONCURRENCY");
+    throwIfAborted(cancellationController.signal);
     const attach = new WorkflowAttachRepository(sourceProductPool);
     const replay = await Promise.all([
       attach.attachCapture(employee, first.artifact.id, first.factCard.id, "2026-08-30T09:00:01.000Z"),
@@ -163,11 +173,13 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     });
     await assertTenantIsolationForEveryTable(sourceAdmin, sourceApp);
     await assertAppendOnlyBehavior(sourceAdmin);
+    throwIfAborted(cancellationController.signal);
 
     progress("BACKUP_RESTORE");
+    throwIfAborted(cancellationController.signal);
     const sourceDigest = await logicalDigests(sourceAdmin);
     const sourceCatalogDigest = await catalogDigest(sourceAdmin);
-    const dumpDigest = await dumpAndRestore(config, sourceAdmin);
+    const dumpDigest = await dumpAndRestore(config, sourceAdmin, cancellationController.signal);
     assert.match(dumpDigest, /^[0-9a-f]{64}$/);
     assert.deepEqual(await logicalDigests(restoreAdmin), sourceDigest);
     assert.equal(await catalogDigest(restoreAdmin), sourceCatalogDigest);
@@ -181,6 +193,7 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     const restored = capturePair("WO018-restored-write", "WO018-P-R", "2026-08-30T11:00:00.000Z");
     await restoredCapture.saveCapture(employee, restored.artifact, restored.factCard);
     assert.equal((await restoredCapture.getArtifact(employee, restored.artifact.id))?.id, restored.artifact.id);
+    throwIfAborted(cancellationController.signal);
   } catch (error) {
     const safe = error instanceof AcceptanceError
       ? error
@@ -195,10 +208,17 @@ test("WO-018 real PostgreSQL acceptance", { timeout: 300_000 }, async () => {
     if (sourceTouched) cleanup.push(await settle(resetPublicSchema(sourceAdmin)));
     if (restoreTouched) cleanup.push(await settle(resetPublicSchema(restoreAdmin)));
     cleanup.push(await settle(sourceAdmin.end()), await settle(restoreAdmin.end()));
+    cancellation.dispose();
     if (cleanup.some(({ status }) => status === "rejected")) {
       console.error("[WO018][FAIL] CLEANUP_FAILED");
       failure ??= new AcceptanceError("CLEANUP_FAILED");
     }
+  }
+  if (cancellation.exitCode !== null) {
+    const signalExitCode = cancellation.exitCode;
+    process.exitCode = signalExitCode;
+    process.once("beforeExit", () => { process.exitCode = signalExitCode; });
+    failure ??= new AcceptanceError("ACCEPTANCE_CANCELLED");
   }
   if (failure) throw failure;
   progress("PASS");

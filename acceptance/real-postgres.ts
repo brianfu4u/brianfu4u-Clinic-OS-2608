@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import type { EventEmitter } from "node:events";
 import { Pool, type PoolClient } from "pg";
 import { applyMigrations, loadRepositoryMigrations } from "../src/persistence/migration-runner.ts";
 
@@ -33,6 +34,28 @@ export class AcceptanceError extends Error {
     this.name = "AcceptanceError";
     this.code = code;
   }
+}
+
+export function installSignalCancellation(
+  controller: AbortController,
+  target: Pick<EventEmitter, "on" | "off"> = process,
+) {
+  let exitCode: number | null = null;
+  const onInterrupt = () => { exitCode ??= 130; controller.abort(); };
+  const onTerminate = () => { exitCode ??= 143; controller.abort(); };
+  target.on("SIGINT", onInterrupt);
+  target.on("SIGTERM", onTerminate);
+  return {
+    get exitCode() { return exitCode; },
+    dispose() {
+      target.off("SIGINT", onInterrupt);
+      target.off("SIGTERM", onTerminate);
+    },
+  };
+}
+
+export function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new AcceptanceError("ACCEPTANCE_CANCELLED");
 }
 
 export type AcceptanceConfig = ReturnType<typeof loadConfig>;
@@ -212,14 +235,27 @@ export async function assertRlsCatalog(admin: Pool): Promise<void> {
   );
   assert.equal(tables.rows.length, BUSINESS_TABLES.length);
   assert.ok(tables.rows.every((row) => row.relrowsecurity && row.relforcerowsecurity));
-  const policies = await admin.query<{ tablename: string; qual: string | null; with_check: string | null }>(
-    `SELECT tablename, qual, with_check FROM pg_policies
+  const policies = await admin.query<{
+    tablename: string; policyname: string; permissive: string; roles: string[]; cmd: string;
+    qual: string | null; with_check: string | null;
+  }>(
+    `SELECT tablename, policyname, permissive, roles, cmd, qual, with_check FROM pg_policies
       WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
     [BUSINESS_TABLES],
   );
   assert.equal(policies.rows.length, BUSINESS_TABLES.length);
-  assert.ok(policies.rows.every((row) =>
-    row.qual?.includes("app.clinic_id") && row.with_check?.includes("app.clinic_id")));
+  const expectedExpression = "(clinic_id = current_setting('app.clinic_id'::text, true))";
+  for (const table of BUSINESS_TABLES) {
+    assert.deepEqual(policies.rows.find((row) => row.tablename === table), {
+      tablename: table,
+      policyname: `${table}_clinic_scope`,
+      permissive: "PERMISSIVE",
+      roles: ["public"],
+      cmd: "ALL",
+      qual: expectedExpression,
+      with_check: expectedExpression,
+    });
+  }
 }
 
 export async function assertAppendOnlyTriggers(admin: Pool): Promise<void> {
@@ -269,7 +305,9 @@ export async function assertNoTenantLeak(app: Pool): Promise<void> {
   }
 }
 
-export async function runBinary(binary: string, args: string[], url: string): Promise<string> {
+export async function runBinary(
+  binary: string, args: string[], url: string, signal?: AbortSignal, timeoutMs = 30_000,
+): Promise<string> {
   const parsed = new URL(url);
   const env = {
     ...process.env,
@@ -282,18 +320,49 @@ export async function runBinary(binary: string, args: string[], url: string): Pr
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    let settled = false;
+    let forcedError: AcceptanceError | undefined;
+    let forceTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: AcceptanceError) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      signal?.removeEventListener("abort", onAbort);
+      error ? reject(error) : resolve(output);
+    };
+    const stop = (code: string) => {
+      if (settled || forcedError) return;
+      forcedError = new AcceptanceError(code);
+      if (!child.kill("SIGTERM")) {
+        finish(forcedError);
+        return;
+      }
+      forceTimer = setTimeout(() => {
+        if (!settled && !child.kill("SIGKILL")) finish(forcedError);
+      }, 2_000);
+      forceTimer.unref();
+    };
+    const onAbort = () => stop("POSTGRES_BINARY_ABORTED");
+    const timer = setTimeout(() => stop("POSTGRES_BINARY_TIMEOUT"), timeoutMs);
+    timer.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk) => { output += String(chunk); });
-    child.on("error", () => reject(new AcceptanceError("POSTGRES_BINARY_REQUIRED")));
-    child.on("close", (code) => code === 0
-      ? resolve(output)
-      : reject(new AcceptanceError("POSTGRES_BINARY_FAILED")));
+    child.stderr.resume();
+    child.on("error", () => finish(new AcceptanceError("POSTGRES_BINARY_REQUIRED")));
+    child.on("close", (code) => forcedError
+      ? finish(forcedError)
+      : code === 0 ? finish() : finish(new AcceptanceError("POSTGRES_BINARY_FAILED")));
+    if (signal?.aborted) onAbort();
   });
 }
 
-export async function assertBinaries(expectedMajors?: readonly number[]): Promise<{ dump: number; restore: number }> {
+export async function assertBinaries(
+  expectedMajors?: readonly number[], signal?: AbortSignal,
+): Promise<{ dump: number; restore: number }> {
   const majors: number[] = [];
   for (const binary of ["pg_dump", "pg_restore"]) {
-    const version = await runBinary(binary, ["--version"], "postgresql://unused:unused@localhost/unused");
+    const version = await runBinary(binary, ["--version"], "postgresql://unused:unused@localhost/unused", signal);
     const major = Number(version.match(/(\d+)(?:\.\d+)?/)?.[1]);
     if (major !== 16 && major !== 17) throw new AcceptanceError("POSTGRES_VERSION_UNSUPPORTED");
     majors.push(major);
@@ -304,14 +373,16 @@ export async function assertBinaries(expectedMajors?: readonly number[]): Promis
   return { dump: majors[0]!, restore: majors[1]! };
 }
 
-export async function dumpAndRestore(config: AcceptanceConfig, sourceAdmin: Pool): Promise<string> {
+export async function dumpAndRestore(
+  config: AcceptanceConfig, sourceAdmin: Pool, signal?: AbortSignal,
+): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "clinic-os-wo018-"));
   const file = join(directory, "acceptance.dump");
   try {
-    await runBinary("pg_dump", ["--format=custom", "--no-owner", "--no-acl", "--file", file], config.sourceAdmin);
+    await runBinary("pg_dump", ["--format=custom", "--no-owner", "--no-acl", "--file", file], config.sourceAdmin, signal, 120_000);
     const { readFile } = await import("node:fs/promises");
     const digest = createHash("sha256").update(await readFile(file)).digest("hex");
-    await runBinary("pg_restore", ["--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", "--dbname", decodeURIComponent(new URL(config.restoreAdmin).pathname.slice(1)), file], config.restoreAdmin);
+    await runBinary("pg_restore", ["--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", "--dbname", decodeURIComponent(new URL(config.restoreAdmin).pathname.slice(1)), file], config.restoreAdmin, signal, 120_000);
     return digest;
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -372,8 +443,15 @@ export async function assertTenantIsolationForEveryTable(admin: Pool, app: Pool)
         );
         assert.ok(visible.rows.length > 0, `${table}: ${clinicId} visible`);
         assert.ok(visible.rows.every((row) => row.clinic_id === clinicId), `${table}: tenant leak`);
-        await client.query("ROLLBACK");
+        if (table === "workflow" || table === "expectation") {
+          const foreignClinic = clinicId === "WO018-A" ? "WO018-B" : "WO018-A";
+          await assert.rejects(client.query(
+            `UPDATE ${quoteIdentifier(table)} SET clinic_id=$1 WHERE clinic_id=$2`,
+            [foreignClinic, clinicId],
+          ), `${table}: cross-clinic RLS write must fail`);
+        }
       } finally {
+        await client.query("ROLLBACK").catch(() => undefined);
         client.release();
       }
     }

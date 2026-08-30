@@ -40,6 +40,8 @@ restored application role. Temporary dump content is removed in `finally`.
 
 The harness resets both dedicated public schemas during cleanup, including on a failed assertion.
 Loss of those dedicated databases is therefore expected and intentional.
+`SIGINT` and `SIGTERM` cancel active PostgreSQL binaries, wait for schema and pool cleanup, and then
+leave with a non-zero signal-specific exit code; the harness never bypasses cleanup with a direct exit.
 
 ## Required result
 
