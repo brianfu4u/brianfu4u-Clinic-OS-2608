@@ -137,6 +137,58 @@ export class ExtractionPersistenceRepository {
       throw new DomainError("EXTRACTION_PERSISTENCE_FAILED", "Extraction persistence failed.");
     }
   }
+
+  /** Return only the bounded, detached extraction projection for restart replay. */
+  async getExtraction(
+    context: ActorContext,
+    requestId: string,
+  ): Promise<StoredEvidenceExtractionResult | null> {
+    let captured: { context: ActorContext; requestId: string };
+    try {
+      captured = snapshotInertExtractionInput({ context, requestId });
+      exactObject(captured.context, ["actorId", "clinicId", "role"], "INVALID_ACTOR_CONTEXT");
+      assertActorContext(captured.context);
+      if (!nonblank(captured.requestId) || captured.requestId.length > 256) {
+        throw new DomainError("INVALID_EXTRACTION_REQUEST", "Extraction request ID is invalid.");
+      }
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      throw new DomainError("INVALID_EXTRACTION_REQUEST", "Extraction request ID is invalid.");
+    }
+
+    try {
+      return await withTenantTransaction(this.#pool, captured.context.clinicId, async (client) => {
+        const attempt = await findAttempt(client, captured.context.clinicId, captured.requestId);
+        if (!attempt) return null;
+        const objectRef = await findObjectRef(client, captured.context.clinicId, attempt.object_id);
+        const artifact = await findArtifact(client, captured.context.clinicId, attempt.artifact_id);
+        if (!objectRef || !artifact) {
+          throw new DomainError("EXTRACTION_LINEAGE_CORRUPT", "Stored extraction lineage is incomplete.");
+        }
+        if (objectRef.contentSha256 !== attempt.object_content_sha256) {
+          throw new DomainError("EXTRACTION_LINEAGE_CORRUPT", "Stored extraction lineage is inconsistent.");
+        }
+        let factCard: EvidenceFactCard | null = null;
+        if (attempt.status === "READY") {
+          if (!attempt.fact_card_id) {
+            throw new DomainError("EXTRACTION_LINEAGE_CORRUPT", "Stored READY extraction has no FactCard.");
+          }
+          factCard = await findFactCard(client, captured.context.clinicId, attempt.fact_card_id);
+          if (!factCard || factCard.artifactId !== artifact.id) {
+            throw new DomainError("EXTRACTION_LINEAGE_CORRUPT", "Stored extraction FactCard is inconsistent.");
+          }
+        } else if (attempt.fact_card_id !== null) {
+          throw new DomainError("EXTRACTION_LINEAGE_CORRUPT", "Stored review extraction has a FactCard.");
+        }
+        const result = resultFromRows(artifact, factCard, attempt);
+        validateExtraction(captured.context, objectRef, result, this.#spec);
+        return structuredClone(result);
+      });
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      throw new DomainError("EXTRACTION_PERSISTENCE_FAILED", "Extraction persistence failed.");
+    }
+  }
 }
 
 function validateExtraction(

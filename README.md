@@ -98,6 +98,12 @@ use a synthetic local provider only; real OCR/model integration and persistence 
 The synthetic extraction spec freezes its fixture model identity; a real adapter requires a new
 server-approved spec and contract tests rather than silently reusing that fixture identity.
 
+The extraction golden-path application service now makes extraction restartable: it snapshots and
+validates the command, checks the tenant-scoped immutable extraction projection before reading
+object bytes, persists the validated result, and sends only `READY` results to the authoritative
+persisted Workflow/Expectation/S2 path. `REVIEW_REQUIRED` stops at extraction for human review;
+replays reuse the stored lineage and never rerun inference.
+
 The first real local OCR adapter uses the exact hashed Tesseract 5.3.4 English baseline documented
 in `models/tesseract-eng-v1.manifest.json`. Its separate non-PHI synthetic smoke gate is:
 
