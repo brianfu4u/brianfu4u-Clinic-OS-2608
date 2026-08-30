@@ -1,0 +1,17 @@
+{
+  "manifestVersion": "tesseract-model-manifest-v1",
+  "modelId": "tesseract-eng-eye-exam-v1",
+  "engineName": "tesseract",
+  "engineVersion": "5.3.4",
+  "leptonicaVersion": "1.82.0",
+  "purpose": "synthetic-english-eye-exam-ocr-smoke",
+  "executableSha256": "9f831cab7525c3dab04af41bda35182af7ea1df9dceeaaa2f3bf207ac45c06a5",
+  "engTraineddataSha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+  "osdTraineddataSha256": "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff",
+  "language": "eng",
+  "licenseSpdx": "Apache-2.0",
+  "schemaVersion": "eye-exam-candidate-v1",
+  "minimumHardware": "x86_64 CPU; 512 MiB available memory",
+  "rollbackModelId": "disabled",
+  "offlinePackageReference": "clinic-os-tesseract-eng-v1"
+}

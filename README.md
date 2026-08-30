@@ -97,3 +97,14 @@ Artifact and FactCard after deterministic schema and authority-key validation. T
 use a synthetic local provider only; real OCR/model integration and persistence remain separate.
 The synthetic extraction spec freezes its fixture model identity; a real adapter requires a new
 server-approved spec and contract tests rather than silently reusing that fixture identity.
+
+The first real local OCR adapter uses the exact hashed Tesseract 5.3.4 English baseline documented
+in `models/tesseract-eng-v1.manifest.json`. Its separate non-PHI synthetic smoke gate is:
+
+```bash
+npm run accept:ocr-local
+```
+
+Passing this command proves only the English adapter path. Strict network isolation and approved
+Japanese/Chinese clinical-language accuracy remain open deployment gates; see
+`docs/runbooks/local-ocr-acceptance.md`.
