@@ -48,10 +48,14 @@ export class EmployeeOpenExpectationReadRepository {
     context: ActorContext,
     rawQuery: EmployeeOpenExpectationQuery,
     consequenceKind: EyeExamFlowKind,
+    identityAnchor?: string,
   ): Promise<EmployeeOpenExpectationPage> {
-    const captured = structuredClone({ context, query: rawQuery, consequenceKind });
+    const captured = structuredClone({ context, query: rawQuery, consequenceKind, identityAnchor });
     assertActorAccess(captured.context, captured.context.clinicId, "EMPLOYEE");
     if (!isEyeExamFlowKind(captured.consequenceKind)) {
+      throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
+    }
+    if (captured.identityAnchor !== undefined && !isOpaqueId(captured.identityAnchor)) {
       throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
     }
     const query = validateQuery(captured.query);
@@ -82,6 +86,7 @@ export class EmployeeOpenExpectationReadRepository {
            AND e.state = 'OPEN'
            AND w.status = 'OPEN'
            AND e.consequence_kind = $7
+           AND ($8::text IS NULL OR w.identity_anchor = $8)
            AND e.triggered_at <= $3::timestamptz
            AND $3::timestamptz < e.due_at
            AND ($4::timestamptz IS NULL OR e.due_at > $4::timestamptz
@@ -90,7 +95,7 @@ export class EmployeeOpenExpectationReadRepository {
          LIMIT $6`, [
         captured.context.clinicId, captured.context.actorId, query.asOf,
         query.cursor?.dueAt ?? null, query.cursor?.expectationId ?? "", query.limit + 1,
-        captured.consequenceKind,
+        captured.consequenceKind, captured.identityAnchor ?? null,
       ]);
       return result.rows;
     });

@@ -44,6 +44,7 @@ const EXTRACTION_PATH = "/api/employee/extraction/exam-report";
 const UPLOAD_PATH = "/api/employee/evidence-objects";
 const OPEN_EXPECTATIONS_PATH = "/api/employee/open-expectations";
 const REGISTRATION_TRIGGER_PATH = "/api/employee/registration-trigger";
+const PRESCRIPTION_TRIGGER_PATH = "/api/employee/prescription-trigger";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024 + 1024 * 1024;
 const MAX_UPLOAD_HEADER_BYTES = 16 * 1024;
@@ -245,7 +246,7 @@ async function route(
     await handleOpenExpectations(response, url, employeeContext, clinicalBackend, clock());
     return;
   }
-  if (path === REGISTRATION_TRIGGER_PATH) {
+  if (path === REGISTRATION_TRIGGER_PATH || path === PRESCRIPTION_TRIGGER_PATH) {
     if (method !== "POST") {
       sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
       return;
@@ -255,7 +256,8 @@ async function route(
       request.resume();
       return;
     }
-    await handleRegistrationTrigger(request, response, employeeContext, clinicalBackend, clock, bodyTimeoutMs, operationTimeoutMs);
+    await handleStageTrigger(request, response, employeeContext, clinicalBackend, clock, bodyTimeoutMs, operationTimeoutMs,
+      path === REGISTRATION_TRIGGER_PATH ? "REGISTRATION" : "PRESCRIPTION");
     return;
   }
 
@@ -419,7 +421,7 @@ async function handleOpenExpectations(
 
 type RegistrationTriggerBody = { identityAnchor: string; occurredAt: string };
 
-async function handleRegistrationTrigger(
+async function handleStageTrigger(
   request: IncomingMessage,
   response: ServerResponse,
   employeeContext: ActorContext,
@@ -427,10 +429,14 @@ async function handleRegistrationTrigger(
   clock: () => string,
   bodyTimeoutMs: number,
   operationTimeoutMs: number,
+  stage: "REGISTRATION" | "PRESCRIPTION",
 ): Promise<void> {
   try {
     assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
-    if (typeof clinicalBackend?.createRegistrationTrigger !== "function") {
+    const trigger = stage === "REGISTRATION"
+      ? clinicalBackend?.createRegistrationTrigger
+      : clinicalBackend?.createPrescriptionTrigger;
+    if (typeof trigger !== "function") {
       throw new DomainError("PERSISTED_REGISTRATION_UNAVAILABLE", "Persisted registration is not configured.");
     }
     requireJsonContentType(request.headers["content-type"]);
@@ -441,7 +447,7 @@ async function handleRegistrationTrigger(
     if (occurredAt === null || received === null || occurredAt > received) {
       throw new DomainError("INVALID_REGISTRATION_REQUEST", "Registration request is invalid.");
     }
-    const result = await withDeadline(clinicalBackend.createRegistrationTrigger(employeeContext, {
+    const result = await withDeadline(trigger.call(clinicalBackend, employeeContext, {
       identityAnchor: body.identityAnchor,
       occurredAt: body.occurredAt,
       idempotencyKey: requireIdempotencyKey(request.headers["idempotency-key"]),

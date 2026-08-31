@@ -8,6 +8,7 @@ import {
 } from "../application/extraction-golden-path.ts";
 import { assertActorAccess } from "../domain/access-context.ts";
 import type { ActorContext, Artifact, EvidenceFactCard, ManagerDecisionAction } from "../domain/contracts.ts";
+import { nextEyeExamExpectation } from "../domain/eye-exam-flow-policy.ts";
 import { DomainError } from "../domain/errors.ts";
 import { CaptureRepository } from "../persistence/capture-repository.ts";
 import type { DatabasePool } from "../persistence/database-contracts.ts";
@@ -35,9 +36,13 @@ export interface ClinicalRegistrationTriggerInput {
   receivedAt: string;
 }
 
+export interface ClinicalPrescriptionTriggerInput extends ClinicalRegistrationTriggerInput {}
+
 export type ClinicalRegistrationTriggerResult =
   | { status: "COMPLETED"; expectationId: string; expectationState: "OPEN" | "UNMET"; verificationStatus: "PENDING" }
   | { status: "REVIEW_REQUIRED" };
+
+export type ClinicalPrescriptionTriggerResult = ClinicalRegistrationTriggerResult;
 
 export interface ClinicalManagerDecisionInput {
   expectationId: string;
@@ -57,6 +62,10 @@ export interface ClinicalPreviewBackend {
     context: ActorContext,
     input: ClinicalRegistrationTriggerInput,
   ): Promise<ClinicalRegistrationTriggerResult>;
+  createPrescriptionTrigger?(
+    context: ActorContext,
+    input: ClinicalPrescriptionTriggerInput,
+  ): Promise<ClinicalPrescriptionTriggerResult>;
   submitExamReportConsequence?(
     context: ActorContext,
     command: ProcessGoldenPathCommand,
@@ -233,6 +242,85 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     });
   }
 
+  async createPrescriptionTrigger(
+    context: ActorContext,
+    rawInput: ClinicalPrescriptionTriggerInput,
+  ): Promise<ClinicalPrescriptionTriggerResult> {
+    const capturedContext = snapshotActorContext(context);
+    assertActorAccess(capturedContext, capturedContext.clinicId, "EMPLOYEE");
+    const input = structuredClone(rawInput);
+    requireExactRegistrationInput(input);
+    requireKey(input.idempotencyKey);
+    const occurredAt = parseStrictIsoInstant(input.occurredAt);
+    const receivedAt = parseStrictIsoInstant(input.receivedAt);
+    if (occurredAt === null || receivedAt === null || occurredAt > receivedAt || !isExactDemoAnchor(input.identityAnchor)) {
+      throw new DomainError("INVALID_CLINICAL_PREVIEW_INPUT", "Prescription command is invalid.");
+    }
+    const artifactId = stableId("artifact", capturedContext, input.idempotencyKey);
+    const existing = await this.#capture.getArtifact(capturedContext, artifactId);
+    const operationAt = existing?.createdAt ?? input.receivedAt;
+    const expectationId = existing ? storedConsequenceExpectation(existing) : await this.#currentStageExpectation(
+      capturedContext, input.identityAnchor, "PRESCRIPTION", input.receivedAt,
+    );
+    const artifact: Artifact = {
+      id: artifactId,
+      clinicId: capturedContext.clinicId,
+      kind: "PRESCRIPTION",
+      occurredAt: input.occurredAt,
+      occurredAtSource: "employee_confirmed",
+      sourceEmployeeId: capturedContext.actorId,
+      identityAnchor: input.identityAnchor,
+      payload: { previewPrescription: true, consequenceExpectationId: expectationId },
+      createdAt: operationAt,
+    };
+    const factCard: EvidenceFactCard = {
+      id: stableId("fact", capturedContext, input.idempotencyKey), clinicId: capturedContext.clinicId,
+      artifactId, subjectType: "PATIENT", identityAnchor: input.identityAnchor, workflowFamily: "EYE_EXAM",
+      occurredAt: input.occurredAt, fields: { previewPrescription: true }, missingFields: [], confidence: 1,
+      parserVersion: "preview-prescription-trigger-1", lineageArtifactIds: [artifactId],
+    };
+    const consequence = await this.#path.recordConsequence(capturedContext, {
+      artifact, factCard, expectationId, attachedAt: operationAt, evaluatedAt: operationAt,
+    });
+    if (consequence.status === "REVIEW_REQUIRED") return { status: "REVIEW_REQUIRED" };
+    if (consequence.expectation.expectation.state !== "MET" || consequence.verification.result.status !== "VERIFIED") {
+      throw new DomainError("INVALID_PRESCRIPTION_RESULT", "Prescription did not satisfy its expected registration consequence.");
+    }
+    const next = nextEyeExamExpectation("PRESCRIPTION", input.occurredAt);
+    if (!next) throw new DomainError("INVALID_FLOW_POLICY", "Prescription must create an exam report expectation.");
+    const nextResult = await this.#path.recordTrigger(capturedContext, {
+      artifact,
+      factCard,
+      expectation: {
+        id: stableId("expectation", capturedContext, `${input.idempotencyKey}:next`),
+        triggerKind: next.triggerKind, consequenceKind: next.consequenceKind,
+        triggeredAt: input.occurredAt, dueAt: next.dueAt,
+      },
+      attachedAt: operationAt, evaluatedAt: operationAt,
+    });
+    if (nextResult.status === "REVIEW_REQUIRED") return { status: "REVIEW_REQUIRED" };
+    const expectation = nextResult.expectation.expectation;
+    if ((expectation.state !== "OPEN" && expectation.state !== "UNMET") || nextResult.verification.result.status !== "PENDING") {
+      throw new DomainError("INVALID_PRESCRIPTION_RESULT", "Prescription did not establish the next pending expectation.");
+    }
+    return { status: "COMPLETED", expectationId: expectation.id, expectationState: expectation.state, verificationStatus: "PENDING" };
+  }
+
+  async #currentStageExpectation(
+    context: ActorContext,
+    identityAnchor: string,
+    consequenceKind: "PRESCRIPTION",
+    asOf: string,
+  ): Promise<string> {
+    const page = await this.#openExpectations.listOpenFlowExpectations(
+      context, { asOf, limit: 2 }, consequenceKind, identityAnchor,
+    );
+    if (page.items.length !== 1) {
+      throw new DomainError("EXPECTATION_SELECTION_REQUIRED", "A single current flow expectation is required.");
+    }
+    return page.items[0].expectationId;
+  }
+
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]> {
     return this.#closures.listManagerClosures(context);
   }
@@ -306,6 +394,17 @@ function requireExpectationId(value: unknown): string {
     throw new DomainError("INVALID_EXPECTATION_ID", "Expectation ID is invalid.");
   }
   return value;
+}
+
+function storedConsequenceExpectation(artifact: Artifact): string {
+  const payload = artifact.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+      Object.getPrototypeOf(payload) !== Object.prototype ||
+      Object.keys(payload).sort().join("|") !== "consequenceExpectationId|previewPrescription" ||
+      (payload as Record<string, unknown>).previewPrescription !== true) {
+    throw new DomainError("ARTIFACT_ID_CONFLICT", "Persisted prescription identity is inconsistent.");
+  }
+  return requireExpectationId((payload as Record<string, unknown>).consequenceExpectationId);
 }
 
 function requireExactRegistrationInput(value: ClinicalRegistrationTriggerInput): void {
