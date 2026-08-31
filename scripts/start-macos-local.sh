@@ -7,7 +7,7 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
 fi
 
 readonly TESSERACT_ROOT="/opt/homebrew/Cellar/tesseract/5.5.3"
-readonly OBJECT_ROOT="$HOME/Library/Application Support/ClinicOS/objects"
+readonly OBJECT_ROOT="$HOME/clinic-os-data/objects"
 
 [[ -x "$TESSERACT_ROOT/bin/tesseract" && -f "$TESSERACT_ROOT/share/tessdata/eng.traineddata" && -f "$TESSERACT_ROOT/share/tessdata/configs/tsv" ]] || {
   echo "Approved Tesseract 5.5.3 assets are unavailable." >&2
