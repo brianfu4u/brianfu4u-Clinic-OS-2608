@@ -1,6 +1,6 @@
 # WO-036 — Manager Attention and Gap Read Model
 
-**Status:** Architecture frozen / Builder active  
+**Status:** Focused acceptance passed — full regression queued  
 **Depends on:** Constitution; WO-035
 
 ## Goal
