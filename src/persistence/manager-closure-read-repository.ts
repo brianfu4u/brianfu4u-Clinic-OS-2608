@@ -8,6 +8,7 @@ import type {
 } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
 import { projectManagerClosure } from "../domain/manager-projection.ts";
+import { alignStructuredDocuments } from "../domain/structured-document-alignment.ts";
 import type { DatabasePool, TenantQueryClient } from "./database-contracts.ts";
 import { parseStrictIsoInstant } from "./strict-timestamp.ts";
 import { withTenantTransaction } from "./tenant-transaction.ts";
@@ -45,6 +46,20 @@ export interface ManagerClosureReadItem {
   } | null;
 }
 
+/**
+ * A deliberately small manager-only view of a workflow whose durable document
+ * chain is incomplete or internally inconsistent.  It is an attention cue,
+ * not a verdict or an instruction to act.
+ */
+export interface ManagerAttentionGapItem {
+  workflowId: string;
+  workflowFamily: string;
+  workflowStatus: Workflow["status"];
+  stage: "STRUCTURED_ALIGNMENT";
+  alignmentStatus: "MISSING" | "CONFLICT";
+  reasonCodes: string[];
+}
+
 type WorkflowRow = {
   clinic_id: string; id: string; subject_type: string; identity_anchor: string | null;
   workflow_family: string; status: Workflow["status"]; created_at: Date | string;
@@ -58,6 +73,10 @@ type ExpectationRow = {
 };
 type LinkRow = {
   clinic_id: string; workflow_id: string; artifact_id: string; attached_at: Date | string;
+};
+type AttachedDocumentRow = {
+  clinic_id: string; workflow_id: string; artifact_id: string; kind: string;
+  identity_anchor: string | null; occurred_at: Date | string | null;
 };
 type TransitionRow = {
   clinic_id: string; id: string; expectation_id: string; workflow_id: string;
@@ -87,14 +106,103 @@ export class ManagerClosureReadRepository {
   }
 
   async listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]> {
-    const captured = structuredClone(context);
-    assertActorContext(captured);
-    if (captured.role !== "MANAGER") {
-      throw new DomainError("ROLE_SCOPE_VIOLATION", "This operation requires the MANAGER role.");
-    }
+    const captured = managerContext(context);
     return withTenantTransaction(this.#pool, captured.clinicId, async (client) =>
       structuredClone(await readClosures(client, captured.clinicId)));
   }
+
+  async listManagerAttentionGaps(context: ActorContext): Promise<ManagerAttentionGapItem[]> {
+    const captured = managerContext(context);
+    return withTenantTransaction(this.#pool, captured.clinicId, async (client) => {
+      const closures = await readClosures(client, captured.clinicId);
+      const documents = (await client.query<AttachedDocumentRow>(
+        `SELECT link.clinic_id, link.workflow_id, artifact.id AS artifact_id, artifact.kind,
+                artifact.identity_anchor, artifact.occurred_at
+           FROM workflow_artifact_link AS link
+           JOIN artifact ON artifact.clinic_id = link.clinic_id AND artifact.id = link.artifact_id
+          WHERE link.clinic_id = $1
+          ORDER BY link.workflow_id, artifact.occurred_at NULLS FIRST, artifact.id`, [captured.clinicId],
+      )).rows;
+      return structuredClone(projectAttentionGaps(closures, documents, captured.clinicId));
+    });
+  }
+}
+
+function managerContext(context: ActorContext): ActorContext {
+  const captured = structuredClone(context);
+  assertActorContext(captured);
+  if (captured.role !== "MANAGER") {
+    throw new DomainError("ROLE_SCOPE_VIOLATION", "This operation requires the MANAGER role.");
+  }
+  return captured;
+}
+
+function projectAttentionGaps(
+  closures: ManagerClosureReadItem[], documents: AttachedDocumentRow[], clinicId: string,
+): ManagerAttentionGapItem[] {
+  const closureByWorkflow = new Map<string, ManagerClosureReadItem[]>();
+  for (const closure of closures) {
+    const current = closureByWorkflow.get(closure.workflowId) ?? [];
+    current.push(closure);
+    closureByWorkflow.set(closure.workflowId, current);
+  }
+  const documentsByWorkflow = new Map<string, AttachedDocumentRow[]>();
+  for (const row of documents) {
+    validateAttachedDocument(row, clinicId, closureByWorkflow);
+    const current = documentsByWorkflow.get(row.workflow_id) ?? [];
+    current.push(row);
+    documentsByWorkflow.set(row.workflow_id, current);
+  }
+
+  const result: ManagerAttentionGapItem[] = [];
+  for (const [workflowId, closureItems] of closureByWorkflow) {
+    const first = closureItems[0];
+    const aligned = alignStructuredDocuments((documentsByWorkflow.get(workflowId) ?? []).map((row) => ({
+      schemaVersion: "clinic-os/structured-document/v1",
+      sourceKind: row.kind,
+      kind: row.kind,
+      identityAnchor: row.identity_anchor,
+      occurredAt: row.occurred_at instanceof Date ? row.occurred_at.toISOString() : row.occurred_at,
+      workflowFamily: first.workflowFamily,
+    })));
+    if (aligned.status === "ALIGNED") continue;
+    const reasons = new Set<string>(aligned.reasonCodes);
+    for (const closure of closureItems) {
+      for (const reason of closure.reasonCodes) reasons.add(reason);
+      for (const reason of closure.verificationReasonCodes) reasons.add(reason);
+    }
+    result.push({
+      workflowId,
+      workflowFamily: first.workflowFamily,
+      workflowStatus: first.workflowStatus,
+      stage: "STRUCTURED_ALIGNMENT",
+      alignmentStatus: aligned.status,
+      reasonCodes: orderAttentionReasons(reasons),
+    });
+  }
+  return result;
+}
+
+const ATTENTION_REASON_ORDER = [...new Set([
+  "INVALID_DOCUMENT", "KIND_CONFLICT", "MISSING_REGISTRATION", "MISSING_PRESCRIPTION",
+  "MISSING_EXAM_REPORT", "MISSING_PAYMENT", "DUPLICATE_DOCUMENT", "IDENTITY_CONFLICT",
+  "WORKFLOW_FAMILY_CONFLICT", "TIME_ORDER_CONFLICT", "EXPECTATION_MISSING",
+  "VERIFICATION_MISSING", "TERMINAL_DECISION_MISSING", "EXPECTATION_UNMET",
+  "VERIFICATION_CONFLICT", ...VERIFICATION_REASONS,
+])];
+
+function orderAttentionReasons(reasons: Set<string>): string[] {
+  if ([...reasons].some((reason) => !(ATTENTION_REASON_ORDER as readonly string[]).includes(reason))) {
+    invalidStored();
+  }
+  return ATTENTION_REASON_ORDER.filter((reason) => reasons.has(reason));
+}
+
+function validateAttachedDocument(
+  row: AttachedDocumentRow, clinicId: string, closures: Map<string, ManagerClosureReadItem[]>,
+): void {
+  if (row.clinic_id !== clinicId || blank(row.workflow_id) || blank(row.artifact_id) ||
+      blank(row.kind) || !closures.has(row.workflow_id)) invalidStored();
 }
 
 async function readClosures(

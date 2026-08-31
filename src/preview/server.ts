@@ -338,6 +338,18 @@ async function route(
       : store.managerClosures(managerContext, clock()));
     return;
   }
+  if (method === "GET" && path === "/api/manager/attention-gaps") {
+    if (!clinicalBackend?.listManagerAttentionGaps) {
+      request.resume();
+      sendJson(response, 503, {
+        error: "PERSISTED_MANAGER_ATTENTION_UNAVAILABLE",
+        message: "Manager attention gaps require the persisted preview backend.",
+      });
+      return;
+    }
+    sendJson(response, 200, await clinicalBackend.listManagerAttentionGaps(managerContext));
+    return;
+  }
   if (method === "POST" && path === "/api/manager/decisions") {
     const body = await jsonBody(request);
     rejectUnexpectedKeys(

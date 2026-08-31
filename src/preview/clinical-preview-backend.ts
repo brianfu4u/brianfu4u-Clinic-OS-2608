@@ -18,7 +18,11 @@ import {
   type EmployeeOpenExpectationPage,
   type EmployeeOpenExpectationQuery,
 } from "../persistence/employee-open-expectation-read-repository.ts";
-import { ManagerClosureReadRepository, type ManagerClosureReadItem } from "../persistence/manager-closure-read-repository.ts";
+import {
+  ManagerClosureReadRepository,
+  type ManagerAttentionGapItem,
+  type ManagerClosureReadItem,
+} from "../persistence/manager-closure-read-repository.ts";
 import { ManagerDecisionRepository, type PersistedManagerDecisionResult } from "../persistence/manager-decision-repository.ts";
 import { parseStrictIsoInstant } from "../persistence/strict-timestamp.ts";
 import { VerificationRepository } from "../persistence/verification-repository.ts";
@@ -87,6 +91,7 @@ export interface ClinicalPreviewBackend {
     input: EvidenceObjectIngestionInput,
   ): Promise<StoredObjectRef>;
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]>;
+  listManagerAttentionGaps?(context: ActorContext): Promise<ManagerAttentionGapItem[]>;
   submitManagerDecision(
     context: ActorContext,
     input: ClinicalManagerDecisionInput,
@@ -444,6 +449,10 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
 
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]> {
     return this.#closures.listManagerClosures(context);
+  }
+
+  listManagerAttentionGaps(context: ActorContext): Promise<ManagerAttentionGapItem[]> {
+    return this.#closures.listManagerAttentionGaps(context);
   }
 
   async submitManagerDecision(
