@@ -1,6 +1,6 @@
 # WO-034 — Persisted Payment Completion
 
-**Status:** Architecture frozen / Builder active  
+**Status:** Accepted — Architecture Review passed 2026-08-31  
 **Depends on:** Constitution; WO-033
 
 ## Goal
@@ -45,3 +45,10 @@ already has a current stage control. Prove positive completion, exact replay,
 all negative scope/time/ambiguity paths, and close-before/close-after behavior.
 Run focused tests, `npm test`, closure/runtime demos and `git diff --check`.
 Keep work local: no push, merge or PR.
+
+## Acceptance result
+
+Independent acceptance passed on 2026-08-31: `npm test` 364/364, payment and
+transport focused tests 23/23, persisted closure demo and `git diff --check`.
+The employee can complete only a server-selected current payment stage, and a
+manager can close only after that completion verifies; no push, merge or PR.
