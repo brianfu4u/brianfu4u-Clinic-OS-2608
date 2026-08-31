@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -79,9 +80,10 @@ test("production config rejects runner and manifest trust injection", () => {
 test("checked-in Tesseract manifest is exact, hashed and fail-closed on mutation or replacement", async (t) => {
   const source = new URL("../models/tesseract-eng-v1.manifest.json", import.meta.url);
   // /tmp is intentionally world-writable and therefore rejected by the same
-  // complete-ancestry gate used in production. Use the root-owned system
-  // state area for this positive-path fixture.
-  const root = await mkdtemp("/var/lib/clinic-os-manifest-");
+  // complete-ancestry gate used in production. A user-owned home directory is
+  // also trusted when its ancestry is not group/world writable, so it keeps
+  // this positive-path fixture portable to macOS without weakening the gate.
+  const root = await mkdtemp(join(homedir(), "clinic-os-manifest-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const valid = join(root, "models", "tesseract-eng-v1.manifest.json");
   await mkdir(join(root, "models"), { recursive: true });
