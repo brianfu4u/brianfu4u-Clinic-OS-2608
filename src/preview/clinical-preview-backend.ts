@@ -86,6 +86,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
   readonly #extractionPath?: ExtractionGoldenPath;
   readonly #objectIngestion?: Pick<EvidenceObjectIngestionService, "ingest">;
   readonly #capture: CaptureRepository;
+  readonly #expectations: ExpectationRepository;
   readonly #closures: ManagerClosureReadRepository;
   readonly #decisions: ManagerDecisionRepository;
   readonly #openExpectations: EmployeeOpenExpectationReadRepository;
@@ -98,7 +99,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     this.#path = new PersistedGoldenPath({
       capture: this.#capture,
       attach: new WorkflowAttachRepository(pool),
-      expectation: new ExpectationRepository(pool),
+      expectation: this.#expectations = new ExpectationRepository(pool),
       verification: new VerificationRepository(pool),
     });
     this.#closures = new ManagerClosureReadRepository(pool);
@@ -202,15 +203,17 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       parserVersion: "preview-registration-trigger-1",
       lineageArtifactIds: [artifactId],
     };
+    const next = nextEyeExamExpectation("REGISTRATION", input.occurredAt);
+    if (!next) throw new DomainError("INVALID_FLOW_POLICY", "Registration must create a prescription expectation.");
     const run = () => this.#path.recordTrigger(capturedContext, {
           artifact,
           factCard,
           expectation: {
             id: stableId("expectation", capturedContext, input.idempotencyKey),
-            triggerKind: "REGISTRATION",
-            consequenceKind: "EXAM_REPORT",
+            triggerKind: next.triggerKind,
+            consequenceKind: next.consequenceKind,
             triggeredAt: input.occurredAt,
-            dueAt: new Date(Date.parse(input.occurredAt) + 15 * 60_000).toISOString(),
+            dueAt: next.dueAt,
           },
           attachedAt: operationAt,
           evaluatedAt: operationAt,
@@ -259,9 +262,15 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     const artifactId = stableId("artifact", capturedContext, input.idempotencyKey);
     const existing = await this.#capture.getArtifact(capturedContext, artifactId);
     const operationAt = existing?.createdAt ?? input.receivedAt;
+    // Registration may have been accepted in the same clock tick. Its pending
+    // verification is immutable, so this server-derived, replay-stable instant
+    // gives the consequence a distinct append-only verification identity. It
+    // never changes the immutable createdAt or attachedAt evidence timestamps.
+    const evaluatedAt = new Date(Date.parse(operationAt) + 1).toISOString();
     const expectationId = existing ? storedConsequenceExpectation(existing) : await this.#currentStageExpectation(
-      capturedContext, input.identityAnchor, "PRESCRIPTION", input.receivedAt,
+      capturedContext, input.identityAnchor, "PRESCRIPTION", input.occurredAt, input.receivedAt,
     );
+    if (expectationId === null) return { status: "REVIEW_REQUIRED" };
     const artifact: Artifact = {
       id: artifactId,
       clinicId: capturedContext.clinicId,
@@ -280,11 +289,14 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       parserVersion: "preview-prescription-trigger-1", lineageArtifactIds: [artifactId],
     };
     const consequence = await this.#path.recordConsequence(capturedContext, {
-      artifact, factCard, expectationId, attachedAt: operationAt, evaluatedAt: operationAt,
+      artifact, factCard, expectationId, attachedAt: operationAt, evaluatedAt,
     });
     if (consequence.status === "REVIEW_REQUIRED") return { status: "REVIEW_REQUIRED" };
     if (consequence.expectation.expectation.state !== "MET" || consequence.verification.result.status !== "VERIFIED") {
       throw new DomainError("INVALID_PRESCRIPTION_RESULT", "Prescription did not satisfy its expected registration consequence.");
+    }
+    if (consequence.expectation.expectation.satisfiedByArtifactId !== artifactId) {
+      throw new DomainError("PRESCRIPTION_NOT_CURRENT", "Prescription did not satisfy the selected current expectation.");
     }
     const next = nextEyeExamExpectation("PRESCRIPTION", input.occurredAt);
     if (!next) throw new DomainError("INVALID_FLOW_POLICY", "Prescription must create an exam report expectation.");
@@ -296,7 +308,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
         triggerKind: next.triggerKind, consequenceKind: next.consequenceKind,
         triggeredAt: input.occurredAt, dueAt: next.dueAt,
       },
-      attachedAt: operationAt, evaluatedAt: operationAt,
+      attachedAt: operationAt, evaluatedAt,
     });
     if (nextResult.status === "REVIEW_REQUIRED") return { status: "REVIEW_REQUIRED" };
     const expectation = nextResult.expectation.expectation;
@@ -310,15 +322,26 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     context: ActorContext,
     identityAnchor: string,
     consequenceKind: "PRESCRIPTION",
+    occurredAtValue: string,
     asOf: string,
-  ): Promise<string> {
+  ): Promise<string | null> {
     const page = await this.#openExpectations.listOpenFlowExpectations(
       context, { asOf, limit: 2 }, consequenceKind, identityAnchor,
     );
-    if (page.items.length !== 1) {
+    if (page.items.length === 0) {
       throw new DomainError("EXPECTATION_SELECTION_REQUIRED", "A single current flow expectation is required.");
     }
-    return page.items[0].expectationId;
+    if (page.items.length > 1) return null;
+    const expectation = await this.#expectations.getExpectation(context, page.items[0].expectationId);
+    const occurredAt = parseStrictIsoInstant(occurredAtValue);
+    const triggeredAt = expectation && parseStrictIsoInstant(expectation.triggeredAt);
+    const dueAt = expectation && parseStrictIsoInstant(expectation.dueAt);
+    if (!expectation || occurredAt === null || triggeredAt === null || dueAt === null ||
+        expectation.triggerKind !== "REGISTRATION" || expectation.consequenceKind !== consequenceKind ||
+        expectation.state !== "OPEN" || occurredAt < triggeredAt || occurredAt > dueAt) {
+      throw new DomainError("PRESCRIPTION_NOT_CURRENT", "Prescription is not within its current stage.");
+    }
+    return expectation.id;
   }
 
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]> {

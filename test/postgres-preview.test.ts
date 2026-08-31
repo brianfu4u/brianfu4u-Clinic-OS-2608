@@ -17,6 +17,7 @@ import { createConfiguredPreviewServer, createPreviewServer } from "../src/previ
 
 const NOW = "2026-08-30T09:11:00.000Z";
 const EMPLOYEE: ActorContext = { clinicId: "demo-clinic", actorId: "demo-employee", role: "EMPLOYEE" };
+const OTHER_EMPLOYEE: ActorContext = { clinicId: "demo-clinic", actorId: "other-employee", role: "EMPLOYEE" };
 const MANAGER: ActorContext = { clinicId: "demo-clinic", actorId: "demo-manager", role: "MANAGER" };
 
 class Pool implements DatabasePool {
@@ -94,6 +95,14 @@ function registration(identityAnchor = "DEMO-001", occurredAt = "2026-08-30T09:0
   } satisfies RequestInit;
 }
 
+function prescription(identityAnchor = "DEMO-001", occurredAt = "2026-08-30T09:05:00.000Z", key = "prescription-0001") {
+  return {
+    method: "POST",
+    headers: { "idempotency-key": key },
+    body: JSON.stringify({ identityAnchor, occurredAt }),
+  } satisfies RequestInit;
+}
+
 function previewStableId(prefix: string, context: ActorContext, key: string): string {
   return `${prefix}:${createHash("sha256")
     .update(JSON.stringify([context.clinicId, context.actorId, key]))
@@ -101,7 +110,7 @@ function previewStableId(prefix: string, context: ActorContext, key: string): st
     .slice(0, 32)}`;
 }
 
-test("durable registration creates the persisted trigger chain and survives restart", async () => {
+test("durable registration then prescription advances the persisted employee chain and survives restart", async () => {
   const pool = new Pool(); await pool.migrate();
   try {
     const backend = new PostgresClinicalPreviewBackend(pool);
@@ -117,14 +126,21 @@ test("durable registration creates the persisted trigger chain and survives rest
       assert.equal(registered.body.verificationStatus, "PENDING");
       expectationId = registered.body.expectationId;
       assert.deepEqual(Object.keys(registered.body).sort(), ["expectationId", "expectationState", "status", "verificationStatus"]);
+      const beforePrescription = await json(baseUrl, "/api/employee/open-expectations?limit=25");
+      assert.deepEqual(beforePrescription.body.items, []);
+      const prescribed = await json(baseUrl, "/api/employee/prescription-trigger", prescription());
+      assert.equal(prescribed.response.status, 201);
+      assert.equal(prescribed.body.expectationState, "OPEN");
+      assert.equal(prescribed.body.verificationStatus, "PENDING");
+      assert.notEqual(prescribed.body.expectationId, expectationId);
       const list = await json(baseUrl, "/api/employee/open-expectations?limit=25");
-      assert.equal(list.body.items[0].expectationId, expectationId);
+      assert.equal(list.body.items[0].expectationId, prescribed.body.expectationId);
       assert.doesNotMatch(JSON.stringify(registered.body), /DEMO|artifact|workflow/i);
     });
 
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
       const list = await json(baseUrl, "/api/employee/open-expectations?limit=25");
-      assert.equal(list.body.items[0].expectationId, expectationId);
+      assert.equal(list.body.items.length, 1);
     }, () => "2026-08-30T09:11:00.000Z");
   } finally { await pool.close(); }
 });
@@ -151,6 +167,74 @@ test("registration replay is stable and changed identity under one key conflicts
       assert.equal(changed.response.status, 409);
       assert.equal(changed.body.error, "REGISTRATION_CONFLICT");
     }, () => "2026-08-30T09:11:00.000Z");
+  } finally { await pool.close(); }
+});
+
+test("prescription consumes only its employee's current stage, replays exactly, and rejects caller selection", async () => {
+  const pool = new Pool(); await pool.migrate();
+  try {
+    const backend = new PostgresClinicalPreviewBackend(pool);
+    await server(backend, async (baseUrl) => {
+      await json(baseUrl, "/api/employee/registration-trigger", registration());
+      const before = pool.acquisitions;
+      const injected = await json(baseUrl, "/api/employee/prescription-trigger", {
+        method: "POST",
+        headers: { "idempotency-key": "prescription-injected-0001" },
+        body: JSON.stringify({ identityAnchor: "DEMO-001", occurredAt: "2026-08-30T09:05:00.000Z", expectationId: "injected" }),
+      });
+      assert.equal(injected.response.status, 400);
+      assert.equal(pool.acquisitions, before);
+
+      const outOfOrder = await json(baseUrl, "/api/employee/prescription-trigger", prescription("DEMO-001", "2026-08-30T08:59:00.000Z", "prescription-too-early-0001"));
+      assert.equal(outOfOrder.response.status, 409);
+      assert.equal(outOfOrder.body.error, "PRESCRIPTION_NOT_CURRENT");
+      assert.equal((await pool.db.query<{ count: string }>("SELECT count(*)::text AS count FROM artifact")).rows[0].count, "1");
+
+      const first = await json(baseUrl, "/api/employee/prescription-trigger", prescription());
+      const replay = await json(baseUrl, "/api/employee/prescription-trigger", prescription());
+      assert.equal(first.response.status, 201);
+      assert.deepEqual(replay.body, first.body);
+      assert.deepEqual(Object.keys(first.body).sort(), ["expectationId", "expectationState", "status", "verificationStatus"]);
+      assert.doesNotMatch(JSON.stringify(first.body), /DEMO|artifact|workflow/i);
+
+      for (const changed of [
+        prescription("DEMO-002", "2026-08-30T09:05:00.000Z"),
+        prescription("DEMO-001", "2026-08-30T09:06:00.000Z"),
+      ]) {
+        const conflict = await json(baseUrl, "/api/employee/prescription-trigger", changed);
+        assert.equal(conflict.response.status, 409);
+      }
+    });
+    await assert.rejects(
+      backend.createPrescriptionTrigger(OTHER_EMPLOYEE, {
+        identityAnchor: "DEMO-001", occurredAt: "2026-08-30T09:05:00.000Z", receivedAt: NOW,
+        idempotencyKey: "other-employee-prescription-0001",
+      }),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "EXPECTATION_SELECTION_REQUIRED",
+    );
+  } finally { await pool.close(); }
+});
+
+test("prescription fails closed when its stage is expired and returns review for ambiguity", async () => {
+  const pool = new Pool(); await pool.migrate();
+  try {
+    const backend = new PostgresClinicalPreviewBackend(pool);
+    await server(backend, async (baseUrl) => {
+      await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "expired-registration-0001"));
+      const expired = await json(baseUrl, "/api/employee/prescription-trigger", prescription("DEMO-001", "2026-08-30T09:05:00.000Z", "expired-prescription-0001"));
+      assert.equal(expired.response.status, 409);
+      assert.equal(expired.body.error, "PRESCRIPTION_NOT_CURRENT");
+    }, () => "2026-08-30T09:16:00.000Z");
+
+    await server(backend, async (baseUrl) => {
+      await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-002", "2026-08-30T09:00:00.000Z", "ambiguous-registration-0001"));
+      await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-002", "2026-08-30T09:01:00.000Z", "ambiguous-registration-0002"));
+      const before = (await pool.db.query<{ count: string }>("SELECT count(*)::text AS count FROM artifact")).rows[0].count;
+      const ambiguous = await json(baseUrl, "/api/employee/prescription-trigger", prescription("DEMO-002", "2026-08-30T09:05:00.000Z", "ambiguous-prescription-0001"));
+      assert.equal(ambiguous.response.status, 201);
+      assert.deepEqual(ambiguous.body, { status: "REVIEW_REQUIRED" });
+      assert.equal((await pool.db.query<{ count: string }>("SELECT count(*)::text AS count FROM artifact")).rows[0].count, before);
+    });
   } finally { await pool.close(); }
 });
 
@@ -249,6 +333,7 @@ test("employee open-expectations endpoint is server-scoped, safe, and synthetic-
   try {
     await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
       await json(baseUrl, "/api/employee/registration-trigger", registration("DEMO-001", "2026-08-30T09:00:00.000Z", "open-expectation-registration"));
+      await json(baseUrl, "/api/employee/prescription-trigger", prescription("DEMO-001", "2026-08-30T09:05:00.000Z", "open-expectation-prescription"));
       const listed = await json(baseUrl, "/api/employee/open-expectations?limit=1");
       assert.equal(listed.response.status, 200);
       assert.equal(listed.body.items.length, 1);

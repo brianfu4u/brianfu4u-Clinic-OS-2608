@@ -507,6 +507,9 @@ function mapRegistrationError(error: unknown): { status: number; body: { error: 
   if (["ARTIFACT_ID_CONFLICT", "FACT_CARD_ID_CONFLICT", "EXPECTATION_ID_CONFLICT"].includes(code)) {
     return publicError(409, "REGISTRATION_CONFLICT", "Registration conflicts with an existing operation.");
   }
+  if (["EXPECTATION_SELECTION_REQUIRED", "EXPECTATION_NOT_FOUND", "EXPECTATION_WORKFLOW_MISMATCH", "INVALID_PRESCRIPTION_RESULT", "PRESCRIPTION_NOT_CURRENT"].includes(code)) {
+    return publicError(409, "PRESCRIPTION_NOT_CURRENT", "Prescription is not current for this employee flow.");
+  }
   if (["ROLE_SCOPE_VIOLATION", "TENANT_SCOPE_VIOLATION", "INVALID_ACTOR_CONTEXT", "FORBIDDEN"].includes(code)) {
     return publicError(403, "FORBIDDEN", "The request is not permitted.");
   }
