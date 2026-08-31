@@ -1,6 +1,6 @@
 # WO-036 — Manager Attention and Gap Read Model
 
-**Status:** Focused acceptance passed — full regression queued  
+**Status:** Accepted  
 **Depends on:** Constitution; WO-035
 
 ## Goal
@@ -26,3 +26,7 @@ Prove manager-only and tenant isolation, exact safe projection, deterministic
 ordering, missing/conflict visibility, quiet aligned chains, malformed stored
 rows fail closed and no reads mutate state. Run focused/full tests and demos;
 stay local with no push, merge or PR.
+
+## Acceptance record
+
+Focused repository tests and independent full regression passed: 376/376.

@@ -1,6 +1,6 @@
 # WO-038 — Manager Operations Dashboard
 
-**Status:** Architecture frozen / Builder active  
+**Status:** Accepted  
 **Depends on:** WO-036; WO-037
 
 ## Goal
@@ -30,3 +30,7 @@ Prove the manager view loads both safe read models, has stable bounded counts
 and filters, shows no aligned-chain noise, cannot manufacture a decision from
 an attention item, and keeps employee workspaces unchanged. Run focused and
 full tests locally; no push, merge or PR.
+
+## Acceptance record
+
+Focused dashboard test passed; independent full regression passed: 376/376.

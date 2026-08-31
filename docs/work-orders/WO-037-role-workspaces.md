@@ -1,6 +1,6 @@
 # WO-037 — Role-Scoped Workspaces
 
-**Status:** Architecture frozen / Builder active  
+**Status:** Accepted  
 **Depends on:** WO-036
 
 ## Goal
@@ -26,3 +26,7 @@ invoke another role's command by changing browser fields.
 Test each role UI/server mapping, role spoof rejection, no cross-role route
 access, no clinical action from chat, and unchanged full synthetic chain. Run
 focused/full tests locally; no push, merge or PR.
+
+## Acceptance record
+
+Role-workspace tests passed 3/3; independent full regression passed: 376/376.
