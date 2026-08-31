@@ -45,6 +45,7 @@ const UPLOAD_PATH = "/api/employee/evidence-objects";
 const OPEN_EXPECTATIONS_PATH = "/api/employee/open-expectations";
 const REGISTRATION_TRIGGER_PATH = "/api/employee/registration-trigger";
 const PRESCRIPTION_TRIGGER_PATH = "/api/employee/prescription-trigger";
+const PAYMENT_TRIGGER_PATH = "/api/employee/payment-trigger";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024 + 1024 * 1024;
 const MAX_UPLOAD_HEADER_BYTES = 16 * 1024;
@@ -246,7 +247,7 @@ async function route(
     await handleOpenExpectations(response, url, employeeContext, clinicalBackend, clock());
     return;
   }
-  if (path === REGISTRATION_TRIGGER_PATH || path === PRESCRIPTION_TRIGGER_PATH) {
+  if (path === REGISTRATION_TRIGGER_PATH || path === PRESCRIPTION_TRIGGER_PATH || path === PAYMENT_TRIGGER_PATH) {
     if (method !== "POST") {
       sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
       return;
@@ -257,7 +258,7 @@ async function route(
       return;
     }
     await handleStageTrigger(request, response, employeeContext, clinicalBackend, clock, bodyTimeoutMs, operationTimeoutMs,
-      path === REGISTRATION_TRIGGER_PATH ? "REGISTRATION" : "PRESCRIPTION");
+      path === REGISTRATION_TRIGGER_PATH ? "REGISTRATION" : path === PRESCRIPTION_TRIGGER_PATH ? "PRESCRIPTION" : "PAYMENT");
     return;
   }
 
@@ -429,13 +430,13 @@ async function handleStageTrigger(
   clock: () => string,
   bodyTimeoutMs: number,
   operationTimeoutMs: number,
-  stage: "REGISTRATION" | "PRESCRIPTION",
+  stage: "REGISTRATION" | "PRESCRIPTION" | "PAYMENT",
 ): Promise<void> {
   try {
     assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
-    const trigger = stage === "REGISTRATION"
-      ? clinicalBackend?.createRegistrationTrigger
-      : clinicalBackend?.createPrescriptionTrigger;
+    const trigger = stage === "REGISTRATION" ? clinicalBackend?.createRegistrationTrigger
+      : stage === "PRESCRIPTION" ? clinicalBackend?.createPrescriptionTrigger
+      : clinicalBackend?.createPaymentTrigger;
     if (typeof trigger !== "function") {
       throw new DomainError("PERSISTED_REGISTRATION_UNAVAILABLE", "Persisted registration is not configured.");
     }
@@ -453,7 +454,7 @@ async function handleStageTrigger(
       idempotencyKey: requireIdempotencyKey(request.headers["idempotency-key"]),
       receivedAt,
     }), operationTimeoutMs);
-    sendJson(response, 201, projectRegistrationTriggerResult(result));
+    sendJson(response, 201, projectStageTriggerResult(result));
   } catch (error) {
     const mapped = mapRegistrationError(error);
     if (!response.writableEnded && !response.destroyed) sendJson(response, mapped.status, mapped.body);
@@ -479,13 +480,15 @@ function parseRegistrationTriggerBody(text: string): RegistrationTriggerBody {
   return structuredClone(body);
 }
 
-function projectRegistrationTriggerResult(value: unknown): Record<string, unknown> {
+function projectStageTriggerResult(value: unknown): Record<string, unknown> {
   try {
     const result = structuredClone(value) as Record<string, unknown>;
     if (!isPlainRecord(result)) throw new Error();
     if (result.status === "REVIEW_REQUIRED" && exactKeys(result, ["status"])) return { status: "REVIEW_REQUIRED" };
     if (result.status === "COMPLETED" && exactKeys(result, ["expectationId", "expectationState", "status", "verificationStatus"]) &&
-        isBoundedId(result.expectationId) && ["OPEN", "UNMET"].includes(result.expectationState as string) && result.verificationStatus === "PENDING") {
+        isBoundedId(result.expectationId) &&
+        ((["OPEN", "UNMET"].includes(result.expectationState as string) && result.verificationStatus === "PENDING") ||
+         (result.expectationState === "MET" && result.verificationStatus === "VERIFIED"))) {
       return {
         status: "COMPLETED",
         expectationId: result.expectationId,
@@ -506,6 +509,9 @@ function mapRegistrationError(error: unknown): { status: number; body: { error: 
   if (code === "REQUEST_TIMEOUT") return publicError(504, code, "Request timed out; retry the exact command.");
   if (["ARTIFACT_ID_CONFLICT", "FACT_CARD_ID_CONFLICT", "EXPECTATION_ID_CONFLICT"].includes(code)) {
     return publicError(409, "REGISTRATION_CONFLICT", "Registration conflicts with an existing operation.");
+  }
+  if (["INVALID_PAYMENT_RESULT", "PAYMENT_NOT_CURRENT"].includes(code)) {
+    return publicError(409, "PAYMENT_NOT_CURRENT", "Payment is not current for this employee flow.");
   }
   if (["EXPECTATION_SELECTION_REQUIRED", "EXPECTATION_NOT_FOUND", "EXPECTATION_WORKFLOW_MISMATCH", "INVALID_PRESCRIPTION_RESULT", "PRESCRIPTION_NOT_CURRENT"].includes(code)) {
     return publicError(409, "PRESCRIPTION_NOT_CURRENT", "Prescription is not current for this employee flow.");

@@ -15,9 +15,9 @@ const strings = {
     missingExpectation: "処理する未完了の検査レポートを選択してください。",
     expectationSelect: "未完了の検査レポート", expectationLoading: "未完了の検査レポートを読み込み中…", expectationEmpty: "選択できる未完了の検査レポートはありません。",
     chooseEvidence: "PNG、JPEG、またはPDFファイルを選択してください。",
-    registrationRecorded: "受付登録を記録しました。次に処方を記録してください。", prescriptionRecorded: "処方を記録しました。次に未完了の検査レポートを選択してください。",
+    registrationRecorded: "受付登録を記録しました。次に処方を記録してください。", prescriptionRecorded: "処方を記録しました。次に未完了の検査レポートを選択してください。", paymentRecorded: "会計完了を記録しました。店長が標準クローズできます。",
     evidenceCompleted: "証拠を処理しました", extractionReview: "証拠の抽出に確認が必要です。", compositionReview: "ワークフロー照合に確認が必要です。",
-    employeeIntro: "受付、処方、検査レポートを同じ患者フローへ記録します。", registrationStep: "1. 受付登録", prescriptionStep: "2. 処方", reportStep: "3. 検査レポート", managerIntro: "未完了の患者フローと、店長確認が必要な項目を確認します。", total: "全フロー", verified: "検証済み", attention: "要確認",
+    employeeIntro: "受付、処方、検査レポート、会計を同じ患者フローへ記録します。", registrationStep: "1. 受付登録", prescriptionStep: "2. 処方", reportStep: "3. 検査レポート", paymentStep: "4. 会計完了", managerIntro: "未完了の患者フローと、店長確認が必要な項目を確認します。", total: "全フロー", verified: "検証済み", attention: "要確認",
     networkError: "プレビューサービスに接続できませんでした。もう一度お試しください。",
   },
   zh: {
@@ -36,9 +36,9 @@ const strings = {
     missingExpectation: "请选择要处理的未完成检查报告。",
     expectationSelect: "待处理检查报告", expectationLoading: "正在读取待处理检查报告…", expectationEmpty: "没有可选择的待处理检查报告。",
     chooseEvidence: "请选择PNG、JPEG或PDF文件。",
-    registrationRecorded: "登记已记录。请接着记录处方。", prescriptionRecorded: "处方已记录。请接着选择待处理检查报告。",
+    registrationRecorded: "登记已记录。请接着记录处方。", prescriptionRecorded: "处方已记录。请接着选择待处理检查报告。", paymentRecorded: "收费完成已记录。店长现在可以标准关闭。",
     evidenceCompleted: "证据已处理", extractionReview: "证据抽取需要复核。", compositionReview: "工作流匹配需要复核。",
-    employeeIntro: "将登记、处方和检查报告记录到同一位患者的流程中。", registrationStep: "第一步：前台登记", prescriptionStep: "第二步：医生处方", reportStep: "第三步：上传检查报告", managerIntro: "查看未闭环的患者流程，以及需要店长确认的项目。", total: "全部流程", verified: "已验证", attention: "需关注",
+    employeeIntro: "将登记、处方、检查报告和收费记录到同一位患者的流程中。", registrationStep: "第一步：前台登记", prescriptionStep: "第二步：医生处方", reportStep: "第三步：上传检查报告", paymentStep: "第四步：收费完成", managerIntro: "查看未闭环的患者流程，以及需要店长确认的项目。", total: "全部流程", verified: "已验证", attention: "需关注",
     networkError: "无法连接预览服务，请重试。",
   },
   en: {
@@ -57,9 +57,9 @@ const strings = {
     missingExpectation: "Select an open exam report expectation first.",
     expectationSelect: "Open exam report", expectationLoading: "Loading open exam reports…", expectationEmpty: "No selectable open exam reports.",
     chooseEvidence: "Choose a PNG, JPEG, or PDF evidence file.",
-    registrationRecorded: "Registration recorded. Record the prescription next.", prescriptionRecorded: "Prescription recorded. Select an open exam report next.",
+    registrationRecorded: "Registration recorded. Record the prescription next.", prescriptionRecorded: "Prescription recorded. Select an open exam report next.", paymentRecorded: "Payment completion recorded. The manager can now close the flow.",
     evidenceCompleted: "Evidence processed", extractionReview: "Evidence extraction needs review.", compositionReview: "Workflow matching needs review.",
-    employeeIntro: "Record registration, prescription, and an exam report into the same patient flow.", registrationStep: "1. Reception registration", prescriptionStep: "2. Prescription", reportStep: "3. Upload exam report", managerIntro: "Review incomplete patient flows and items requiring a manager decision.", total: "All flows", verified: "Verified", attention: "Needs attention",
+    employeeIntro: "Record registration, prescription, an exam report, and payment into the same patient flow.", registrationStep: "1. Reception registration", prescriptionStep: "2. Prescription", reportStep: "3. Upload exam report", paymentStep: "4. Payment completion", managerIntro: "Review incomplete patient flows and items requiring a manager decision.", total: "All flows", verified: "Verified", attention: "Needs attention",
     networkError: "The preview service could not be reached. Please try again.",
   },
 };
@@ -108,7 +108,7 @@ function safeServerError(code, status) {
     PERSISTED_REGISTRATION_UNAVAILABLE: "Durable registration is unavailable in this preview.",
     LEGACY_CLINICAL_COMMAND_DISABLED: "Use the explicit registration or evidence command.",
     REGISTRATION_CONFLICT: "This stage conflicts with an existing operation.",
-    PRESCRIPTION_NOT_CURRENT: "The prescription is no longer current for this flow.",
+    PRESCRIPTION_NOT_CURRENT: "The prescription is no longer current for this flow.", PAYMENT_NOT_CURRENT: "Payment is no longer current for this flow.",
     INVALID_REGISTRATION_REQUEST: "The registration request could not be accepted.",
     INVALID_UPLOAD: "The selected evidence could not be accepted.",
     UNSUPPORTED_CONTENT_TYPE: "Select a PNG, JPEG, or PDF evidence file.",
@@ -154,7 +154,7 @@ function renderEmployee() {
     <p class="notice">${previewNotice()}</p>
     ${stageStatus ? `<p class="evidence-status success" role="status">${t(stageStatus)}</p>` : ""}
     ${evidenceStatus ? evidenceStatusMarkup() : ""}
-    <section class="workspace-intro"><h2>${t("employeeIntro")}</h2><p>${t("registrationStep")} → ${t("prescriptionStep")} → ${t("reportStep")} → S2</p></section>
+    <section class="workspace-intro"><h2>${t("employeeIntro")}</h2><p>${t("registrationStep")} → ${t("prescriptionStep")} → ${t("reportStep")} → S2 → ${t("paymentStep")}</p></section>
     ${composer()}
   </main>`;
   bindLanguage();
@@ -176,7 +176,7 @@ function composer() {
   const local = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   return `<form class="composer operational-composer" id="composer"><input type="hidden" name="mode" value="work">
     <div class="work-fields">
-      <label>${t("kind")}<select name="kind"><option value="REGISTRATION" ${composerKind === "REGISTRATION" ? "selected" : ""}>REGISTRATION</option><option value="PRESCRIPTION" ${composerKind === "PRESCRIPTION" ? "selected" : ""}>PRESCRIPTION</option><option value="EXAM_REPORT" ${composerKind === "EXAM_REPORT" ? "selected" : ""}>EXAM_REPORT</option></select></label>
+      <label>${t("kind")}<select name="kind"><option value="REGISTRATION" ${composerKind === "REGISTRATION" ? "selected" : ""}>REGISTRATION</option><option value="PRESCRIPTION" ${composerKind === "PRESCRIPTION" ? "selected" : ""}>PRESCRIPTION</option><option value="EXAM_REPORT" ${composerKind === "EXAM_REPORT" ? "selected" : ""}>EXAM_REPORT</option><option value="PAYMENT" ${composerKind === "PAYMENT" ? "selected" : ""}>PAYMENT</option></select></label>
       <label>${t("anchor")}<input name="identityAnchor" value="DEMO-001" required></label>
       <label>${t("family")}<input name="workflowFamily" value="EYE_EXAM" readonly></label>
       <label>${t("occurredAt")}<input name="occurredAt" type="datetime-local" value="${local}" required></label>
@@ -212,7 +212,7 @@ function bindComposer() {
           return;
         }
         form.dataset.idempotencyKey ||= crypto.randomUUID();
-        const stagePath = kind === "PRESCRIPTION" ? "/api/employee/prescription-trigger" : "/api/employee/registration-trigger";
+        const stagePath = kind === "PRESCRIPTION" ? "/api/employee/prescription-trigger" : kind === "PAYMENT" ? "/api/employee/payment-trigger" : "/api/employee/registration-trigger";
         const result = await api(postgresClinical ? stagePath : "/api/employee/work-updates", { method: "POST", headers: {
           "idempotency-key": form.dataset.idempotencyKey,
         }, body: JSON.stringify(postgresClinical
@@ -220,8 +220,8 @@ function bindComposer() {
           : { topicId: activeTopicId, kind, identityAnchor, workflowFamily: data.get("workflowFamily"), occurredAt: new Date(data.get("occurredAt")).toISOString(), text: data.get("text") }) });
         if (postgresClinical) {
           const stage = validateStageProjection(result);
-          stageStatus = stage.status === "COMPLETED" ? (kind === "PRESCRIPTION" ? "prescriptionRecorded" : "registrationRecorded") : null;
-          if (stage.status === "COMPLETED") composerKind = kind === "PRESCRIPTION" ? "EXAM_REPORT" : "PRESCRIPTION";
+          stageStatus = stage.status === "COMPLETED" ? (kind === "PRESCRIPTION" ? "prescriptionRecorded" : kind === "PAYMENT" ? "paymentRecorded" : "registrationRecorded") : null;
+          if (stage.status === "COMPLETED") composerKind = kind === "PRESCRIPTION" ? "EXAM_REPORT" : kind === "PAYMENT" ? "REGISTRATION" : "PRESCRIPTION";
         }
         delete form.dataset.idempotencyKey;
       }
@@ -255,7 +255,9 @@ function validateStageProjection(value) {
   if (!isPlainObject(value)) throw new Error(t("networkError"));
   if (value.status === "REVIEW_REQUIRED" && exactKeys(value, ["status"])) return { status: "REVIEW_REQUIRED" };
   if (value.status === "COMPLETED" && exactKeys(value, ["expectationId", "expectationState", "status", "verificationStatus"]) &&
-      isBoundedId(value.expectationId) && ["OPEN", "UNMET"].includes(value.expectationState) && value.verificationStatus === "PENDING") {
+      isBoundedId(value.expectationId) &&
+      ((["OPEN", "UNMET"].includes(value.expectationState) && value.verificationStatus === "PENDING") ||
+       (value.expectationState === "MET" && value.verificationStatus === "VERIFIED"))) {
     return { status: "COMPLETED", expectationState: value.expectationState };
   }
   throw new Error(t("networkError"));
@@ -328,6 +330,9 @@ async function submitExamReport(form, data, identityAnchor) {
       }),
     });
     evidenceStatus = validateExtractionProjection(result);
+    if (evidenceStatus.status === "COMPLETED" && evidenceStatus.expectationState === "MET" && evidenceStatus.verificationStatus === "VERIFIED") {
+      composerKind = "PAYMENT";
+    }
     await loadEmployee();
   } finally {
     submit.disabled = false;

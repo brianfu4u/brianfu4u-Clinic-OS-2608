@@ -40,7 +40,9 @@ const REPORT_OCCURRED_AT = "2026-08-30T09:10:00.000Z";
 const REPORT_CREATED_AT = "2026-08-30T09:10:30.000Z";
 const INFERENCE_COMPLETED_AT = "2026-08-30T09:10:40.000Z";
 const REPORT_OPERATION_AT = "2026-08-30T09:11:00.000Z";
-const DECISION_AT = "2026-08-30T09:12:00.000Z";
+const PAYMENT_OCCURRED_AT = "2026-08-30T09:15:00.000Z";
+const PAYMENT_OPERATION_AT = "2026-08-30T09:16:00.000Z";
+const DECISION_AT = "2026-08-30T09:17:00.000Z";
 
 const EMPLOYEE: ActorContext = { clinicId: "closure-demo-clinic", actorId: "closure-demo-employee", role: "EMPLOYEE" };
 const MANAGER: ActorContext = { clinicId: EMPLOYEE.clinicId, actorId: "closure-demo-manager", role: "MANAGER" };
@@ -64,11 +66,11 @@ type Counts = {
 };
 
 export type PersistedClosureSummary = {
-  phases: readonly ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "REPLAY"];
+  phases: readonly ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "CLOSE", "REPLAY"];
   registration: "OPEN";
   extraction: "READY";
   verification: "VERIFIED";
-  payment: "OPEN";
+  payment: "VERIFIED";
   reviewRequired: false;
   inferenceCalls: number;
   counts: Counts;
@@ -132,6 +134,7 @@ export interface PersistedClosureHarness {
   selectOpenPaymentExpectation(context?: ActorContext): Promise<{ expectationId: string; dueAt: string }>;
   register(): Promise<void>;
   prescribe(): Promise<void>;
+  pay(context?: ActorContext, identityAnchor?: string, occurredAt?: string, key?: string, receivedAt?: string): Promise<unknown>;
   upload(bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
   uploadAs(context: ActorContext, bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
   command(expectationId: string, objectRef: Awaited<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>, overrides?: Partial<{
@@ -202,6 +205,11 @@ export async function createPersistedClosureHarness(candidate: ExtractionCandida
       if (result.status !== "COMPLETED" || result.expectationState !== "OPEN" || result.verificationStatus !== "PENDING") {
         throw new DomainError("CLOSURE_DEMO_PRESCRIPTION_FAILED", "Prescription did not establish the expected report stage.");
       }
+    },
+    async pay(context = EMPLOYEE, identityAnchor = SYNTHETIC_ANCHOR, occurredAt = PAYMENT_OCCURRED_AT, key = "closure-payment-0001", receivedAt = PAYMENT_OPERATION_AT) {
+      return backend.createPaymentTrigger!(context, {
+        identityAnchor, occurredAt, receivedAt, idempotencyKey: key,
+      });
     },
     async selectOpenExpectation(context = EMPLOYEE) {
       const page = await backend.listOpenExamReportExpectations(context, { asOf: SELECTION_AT, limit: 2 });
@@ -289,9 +297,15 @@ export async function runPersistedClosureDemo(): Promise<PersistedClosureSummary
     if (payment.dueAt !== "2026-08-30T09:30:00.000Z") {
       throw new DomainError("CLOSURE_DEMO_PAYMENT_FAILED", "Unexpected server-derived payment due time.");
     }
+    const completedPayment = await harness.pay() as { status: string; expectationState: string; verificationStatus: string };
+    if (completedPayment.status !== "COMPLETED" || completedPayment.expectationState !== "MET" || completedPayment.verificationStatus !== "VERIFIED") {
+      throw new DomainError("CLOSURE_DEMO_PAYMENT_FAILED", "Payment did not verify.");
+    }
+    await harness.pay();
+    await harness.close(payment.expectationId);
     return Object.freeze({
-      phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "REPLAY"],
-      registration: "OPEN", extraction: "READY", verification: "VERIFIED", payment: "OPEN",
+      phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "CLOSE", "REPLAY"],
+      registration: "OPEN", extraction: "READY", verification: "VERIFIED", payment: "VERIFIED",
       reviewRequired: false, inferenceCalls: harness.provider.calls,
       counts: await harness.counts(),
     });

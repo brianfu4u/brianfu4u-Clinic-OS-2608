@@ -14,16 +14,16 @@ function code(expected: string) {
 test("persisted closure demo uses only durable production seams and stage replays do not duplicate rows", async () => {
   const summary = await runPersistedClosureDemo();
   assert.deepEqual(summary, {
-    phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "REPLAY"],
+    phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "CLOSE", "REPLAY"],
     registration: "OPEN",
     extraction: "READY",
     verification: "VERIFIED",
-    payment: "OPEN",
+    payment: "VERIFIED",
     reviewRequired: false,
     inferenceCalls: 1,
     counts: {
-      artifacts: 3, factCards: 3, workflows: 1, links: 3, expectations: 3,
-      storedObjects: 1, extractionAttempts: 1, verifications: 5, decisions: 0,
+      artifacts: 4, factCards: 4, workflows: 1, links: 4, expectations: 3,
+      storedObjects: 1, extractionAttempts: 1, verifications: 6, decisions: 1,
     },
   });
 });
@@ -76,6 +76,31 @@ test("only a verified report creates one employee-safe pending payment expectati
     assert.deepEqual(replayPayment, payment);
     await assert.rejects(harness.selectOpenPaymentExpectation(harness.otherEmployee), code("CLOSURE_DEMO_PAYMENT_SELECTION_FAILED"));
     await assert.rejects(harness.selectOpenPaymentExpectation(harness.otherClinicEmployee), code("CLOSURE_DEMO_PAYMENT_SELECTION_FAILED"));
+  } finally { await harness.dispose(); }
+});
+
+test("payment completion is server-selected, exact-replayable, and enables only the final standard close", async () => {
+  const harness = await createPersistedClosureHarness();
+  try {
+    await harness.register(); await harness.prescribe();
+    const report = await harness.selectOpenExpectation();
+    const object = await harness.upload();
+    await harness.submit(report.expectationId, object);
+    const payment = await harness.selectOpenPaymentExpectation();
+    await assert.rejects(harness.close(payment.expectationId), code("DECISION_NOT_ALLOWED"));
+    const before = await harness.counts();
+    const first = await harness.pay() as { status: string; expectationId: string; expectationState: string; verificationStatus: string };
+    assert.deepEqual({ status: first.status, expectationId: first.expectationId === payment.expectationId, expectationState: first.expectationState, verificationStatus: first.verificationStatus }, {
+      status: "COMPLETED", expectationId: true, expectationState: "MET", verificationStatus: "VERIFIED",
+    });
+    const replay = await harness.pay();
+    assert.deepEqual(replay, first);
+    assert.deepEqual(await harness.counts(), { ...before, artifacts: before.artifacts + 1, factCards: before.factCards + 1, links: before.links + 1, verifications: before.verifications + 1 });
+    await assert.rejects(harness.pay(harness.otherEmployee), code("EXPECTATION_SELECTION_REQUIRED"));
+    await assert.rejects(harness.pay(harness.employee, "DEMO-CLOSURE-002", "2026-08-30T09:15:00.000Z", "closure-payment-other-0001"), code("EXPECTATION_SELECTION_REQUIRED"));
+    await assert.rejects(harness.pay(harness.employee, "DEMO-CLOSURE-001", "2026-08-30T09:31:00.000Z", "closure-payment-expired-0001", "2026-08-30T09:31:00.000Z"), code("EXPECTATION_SELECTION_REQUIRED"));
+    const closed = await harness.close(payment.expectationId);
+    assert.equal((closed as { workflow: { status: string } }).workflow.status, "CLOSED");
   } finally { await harness.dispose(); }
 });
 

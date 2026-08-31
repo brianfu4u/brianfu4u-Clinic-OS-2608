@@ -425,6 +425,29 @@ test("registration route is exact-body, query-free, and unavailable in synthetic
   } finally { await pool.close(); }
 });
 
+test("payment route rejects injected authority before the backend and is unavailable in synthetic preview", async () => {
+  const pool = new Pool(); await pool.migrate();
+  try {
+    await server(new PostgresClinicalPreviewBackend(pool), async (baseUrl) => {
+      const before = pool.acquisitions;
+      const injected = await json(baseUrl, "/api/employee/payment-trigger", {
+        method: "POST", headers: { "idempotency-key": "payment-injected-0001" },
+        body: JSON.stringify({ identityAnchor: "DEMO-001", occurredAt: "2026-08-30T09:15:00.000Z", expectationId: "injected" }),
+      });
+      assert.equal(injected.response.status, 400);
+      assert.equal(injected.body.error, "INVALID_REGISTRATION_REQUEST");
+      assert.equal(pool.acquisitions, before);
+    });
+    const synthetic = createPreviewServer();
+    await new Promise<void>((resolve) => synthetic.listen(0, "127.0.0.1", resolve));
+    try {
+      const result = await json(`http://127.0.0.1:${(synthetic.address() as AddressInfo).port}`, "/api/employee/payment-trigger", registration());
+      assert.equal(result.response.status, 503);
+      assert.equal(result.body.error, "PERSISTED_REGISTRATION_UNAVAILABLE");
+    } finally { await new Promise<void>((resolve) => synthetic.close(() => resolve())); }
+  } finally { await pool.close(); }
+});
+
 test("legacy postgres preview and root aliases are rejected without fallback", () => {
   assert.throws(
     () => createConfiguredPreviewServer({ PREVIEW_MODE: "postgres" }),
@@ -535,9 +558,10 @@ test("browser retains pending keys until success, clears them on edit, and gates
   assert.match(source, /form\.addEventListener\("input", clear\)/);
   assert.match(source, /item\.verificationStatus === "VERIFIED" \? \["CLOSE_STANDARD", "VOID"\] : \["VOID"\]/);
   assert.match(source, /<option value="PRESCRIPTION"/);
-  assert.match(source, /const stagePath = kind === "PRESCRIPTION" \? "\/api\/employee\/prescription-trigger" : "\/api\/employee\/registration-trigger"/);
+  assert.match(source, /<option value="PAYMENT"/);
+  assert.match(source, /kind === "PAYMENT" \? "\/api\/employee\/payment-trigger"/);
   assert.match(source, /validateStageProjection\(result\)/);
-  assert.match(source, /composerKind = kind === "PRESCRIPTION" \? "EXAM_REPORT" : "PRESCRIPTION"/);
+  assert.match(source, /composerKind = kind === "PRESCRIPTION" \? "EXAM_REPORT" : kind === "PAYMENT" \? "REGISTRATION" : "PRESCRIPTION"/);
   assert.match(source, /prescriptionStep/);
   assert.match(source, /prescriptionRecorded/);
   assert.match(source, /if \(report && postgresClinical\) void loadOpenExpectations\(form\)/);
