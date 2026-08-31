@@ -534,10 +534,16 @@ test("browser retains pending keys until success, clears them on edit, and gates
   assert.match(source, /pendingDecisionKeys\.get\(resourceId\) \|\| crypto\.randomUUID\(\)/);
   assert.match(source, /form\.addEventListener\("input", clear\)/);
   assert.match(source, /item\.verificationStatus === "VERIFIED" \? \["CLOSE_STANDARD", "VOID"\] : \["VOID"\]/);
-  assert.match(source, /postgresClinical \? "\/api\/employee\/registration-trigger" : "\/api\/employee\/work-updates"/);
-  assert.match(source, /await loadOpenExpectations\(form\)/);
+  assert.match(source, /<option value="PRESCRIPTION"/);
+  assert.match(source, /const stagePath = kind === "PRESCRIPTION" \? "\/api\/employee\/prescription-trigger" : "\/api\/employee\/registration-trigger"/);
+  assert.match(source, /validateStageProjection\(result\)/);
+  assert.match(source, /composerKind = kind === "PRESCRIPTION" \? "EXAM_REPORT" : "PRESCRIPTION"/);
+  assert.match(source, /prescriptionStep/);
+  assert.match(source, /prescriptionRecorded/);
+  assert.match(source, /if \(report && postgresClinical\) void loadOpenExpectations\(form\)/);
   assert.match(source, /employeeIntro/);
   assert.match(source, /managerIntro/);
   assert.match(source, /operational-composer/);
   assert.doesNotMatch(source, /localStorage\.(?:setItem|getItem)\([^)]*(?:expectation|registration|identity)/i);
+  assert.doesNotMatch(source, /prescription-trigger[^\n]*expectationId/);
 });
