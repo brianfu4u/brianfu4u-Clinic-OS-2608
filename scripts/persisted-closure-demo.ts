@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 
 import { EvidenceObjectIngestionService } from "../src/application/evidence-object-ingestion.ts";
+import { DueExpectationBatch } from "../src/application/due-expectation-batch.ts";
 import {
   EYE_EXAM_EXTRACTION_SPEC,
   StoredEvidenceExtractionService,
@@ -134,6 +135,7 @@ export interface PersistedClosureHarness {
   selectOpenPaymentExpectation(context?: ActorContext): Promise<{ expectationId: string; dueAt: string }>;
   register(): Promise<void>;
   prescribe(): Promise<void>;
+  markDue(now: string): Promise<{ state: "UNMET"; verificationStatus: "PENDING" }>;
   pay(context?: ActorContext, identityAnchor?: string, occurredAt?: string, key?: string, receivedAt?: string): Promise<unknown>;
   upload(bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
   uploadAs(context: ActorContext, bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
@@ -148,7 +150,17 @@ export interface PersistedClosureHarness {
   dispose(): Promise<void>;
 }
 
-export async function createPersistedClosureHarness(candidate: ExtractionCandidate = readyCandidate()): Promise<PersistedClosureHarness> {
+export interface PersistedClosureFixture {
+  identityAnchor?: string;
+  keyPrefix?: string;
+}
+
+export async function createPersistedClosureHarness(
+  candidate: ExtractionCandidate = readyCandidate(),
+  fixture: PersistedClosureFixture = {},
+): Promise<PersistedClosureHarness> {
+  const identityAnchor = fixture.identityAnchor ?? SYNTHETIC_ANCHOR;
+  const keyPrefix = fixture.keyPrefix ?? "closure";
   const pool = new PGlitePool();
   const root = await mkdtemp(join(tmpdir(), "clinic-os-closure-"));
   await pool.migrate();
@@ -186,10 +198,10 @@ export async function createPersistedClosureHarness(candidate: ExtractionCandida
     otherEmployee: structuredClone(OTHER_EMPLOYEE), otherClinicEmployee: structuredClone(OTHER_CLINIC_EMPLOYEE),
     async register() {
       const result = await backend.createRegistrationTrigger!(EMPLOYEE, {
-        identityAnchor: SYNTHETIC_ANCHOR,
+        identityAnchor,
         occurredAt: REGISTRATION_OCCURRED_AT,
         receivedAt: REGISTRATION_OPERATION_AT,
-        idempotencyKey: "closure-registration-0001",
+        idempotencyKey: `${keyPrefix}-registration-0001`,
       });
       if (result.status !== "COMPLETED" || result.expectationState !== "OPEN" || result.verificationStatus !== "PENDING") {
         throw new DomainError("CLOSURE_DEMO_REGISTRATION_FAILED", "Registration did not establish the expected pending chain.");
@@ -197,18 +209,28 @@ export async function createPersistedClosureHarness(candidate: ExtractionCandida
     },
     async prescribe() {
       const result = await backend.createPrescriptionTrigger!(EMPLOYEE, {
-        identityAnchor: SYNTHETIC_ANCHOR,
+        identityAnchor,
         occurredAt: PRESCRIPTION_OCCURRED_AT,
         receivedAt: PRESCRIPTION_OPERATION_AT,
-        idempotencyKey: "closure-prescription-0001",
+        idempotencyKey: `${keyPrefix}-prescription-0001`,
       });
       if (result.status !== "COMPLETED" || result.expectationState !== "OPEN" || result.verificationStatus !== "PENDING") {
         throw new DomainError("CLOSURE_DEMO_PRESCRIPTION_FAILED", "Prescription did not establish the expected report stage.");
       }
     },
-    async pay(context = EMPLOYEE, identityAnchor = SYNTHETIC_ANCHOR, occurredAt = PAYMENT_OCCURRED_AT, key = "closure-payment-0001", receivedAt = PAYMENT_OPERATION_AT) {
+    async markDue(now) {
+      const result = await new DueExpectationBatch(pool).processDueExpectations(MANAGER, {
+        now, limit: 10, cursor: null,
+      });
+      if (result.succeeded.length !== 1 || result.succeeded[0]?.state !== "UNMET" ||
+          result.succeeded[0]?.verificationStatus !== "PENDING") {
+        throw new DomainError("CLOSURE_DEMO_DUE_FAILED", "Due processing did not produce one unmet pending stage.");
+      }
+      return { state: "UNMET" as const, verificationStatus: "PENDING" as const };
+    },
+    async pay(context = EMPLOYEE, paymentAnchor = identityAnchor, occurredAt = PAYMENT_OCCURRED_AT, key = `${keyPrefix}-payment-0001`, receivedAt = PAYMENT_OPERATION_AT) {
       return backend.createPaymentTrigger!(context, {
-        identityAnchor, occurredAt, receivedAt, idempotencyKey: key,
+        identityAnchor: paymentAnchor, occurredAt, receivedAt, idempotencyKey: key,
       });
     },
     async selectOpenExpectation(context = EMPLOYEE) {
@@ -225,19 +247,19 @@ export async function createPersistedClosureHarness(candidate: ExtractionCandida
       }
       return structuredClone({ expectationId: page.items[0].expectationId, dueAt: page.items[0].dueAt });
     },
-    async upload(bytes = FIXTURE_BYTES, key = "closure-upload-0001") {
+    async upload(bytes = FIXTURE_BYTES, key = `${keyPrefix}-upload-0001`) {
       return backend.uploadEvidenceObject!(EMPLOYEE, { idempotencyKey: key, mediaType: "image/png", bytes: new Uint8Array(bytes) });
     },
-    async uploadAs(context, bytes = FIXTURE_BYTES, key = "closure-upload-0001") {
+    async uploadAs(context, bytes = FIXTURE_BYTES, key = `${keyPrefix}-upload-0001`) {
       return backend.uploadEvidenceObject!(context, { idempotencyKey: key, mediaType: "image/png", bytes: new Uint8Array(bytes) });
     },
     command(expectationId, objectRef, overrides = {}) {
-      return consequenceCommand(expectationId, objectRef, overrides);
+      return consequenceCommand(expectationId, objectRef, overrides, identityAnchor, keyPrefix);
     },
     async submit(expectationId, objectRef, overrides = {}) {
-      return backend.submitExamReportConsequence!(EMPLOYEE, consequenceCommand(expectationId, objectRef, overrides));
+      return backend.submitExamReportConsequence!(EMPLOYEE, consequenceCommand(expectationId, objectRef, overrides, identityAnchor, keyPrefix));
     },
-    async close(expectationId, action = "CLOSE_STANDARD", key = "closure-decision-0001") {
+    async close(expectationId, action = "CLOSE_STANDARD", key = `${keyPrefix}-decision-0001`) {
       return backend.submitManagerDecision(MANAGER, {
         expectationId, action, reasonCode: null, note: null, idempotencyKey: key, receivedAt: DECISION_AT,
       });
@@ -256,15 +278,17 @@ function consequenceCommand(
   overrides: Partial<{
     requestId: string; artifactId: string; factCardId: string; occurredAt: string; createdAt: string; attachedAt: string; evaluatedAt: string;
   }> = {},
+  identityAnchor = SYNTHETIC_ANCHOR,
+  keyPrefix = "closure",
 ): ProcessGoldenPathCommand {
   return {
     extraction: {
-      requestId: overrides.requestId ?? "closure-extraction-0001",
-      artifactId: overrides.artifactId ?? "closure-report-artifact-0001",
-      factCardId: overrides.factCardId ?? "closure-report-fact-0001",
+      requestId: overrides.requestId ?? `${keyPrefix}-extraction-0001`,
+      artifactId: overrides.artifactId ?? `${keyPrefix}-report-artifact-0001`,
+      factCardId: overrides.factCardId ?? `${keyPrefix}-report-fact-0001`,
       objectRef: structuredClone(objectRef), kind: "EXAM_REPORT",
       occurredAt: overrides.occurredAt ?? REPORT_OCCURRED_AT, occurredAtSource: "source",
-      identityAnchor: SYNTHETIC_ANCHOR, createdAt: overrides.createdAt ?? REPORT_CREATED_AT,
+      identityAnchor, createdAt: overrides.createdAt ?? REPORT_CREATED_AT,
     },
     operation: {
       kind: "CONSEQUENCE", expectationId,

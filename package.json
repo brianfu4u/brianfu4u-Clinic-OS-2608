@@ -11,6 +11,7 @@
     "demo": "node src/domain/golden-path.ts",
     "runtime:demo": "node src/runtime/runtime-demo.ts",
     "demo:closure": "node scripts/persisted-closure-demo.ts",
+    "accept:five-patient": "node scripts/five-patient-ui-acceptance.ts",
     "preview": "node src/preview/server.ts",
     "db:migrate": "node src/persistence/node-pg-client.ts",
     "accept:postgres-real": "node --test acceptance/real-postgres.test.ts",

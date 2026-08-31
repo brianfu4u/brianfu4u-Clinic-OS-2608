@@ -1,6 +1,6 @@
 # WO-040 — Five-Patient UI Acceptance
 
-**Status:** Architecture frozen / Builder queued  
+**Status:** Accepted locally — 2026-08-31
 **Depends on:** WO-037; WO-038; WO-039
 
 ## Goal
@@ -32,3 +32,13 @@ the same bounded server APIs used by the pages.
 
 Run the five flows, prove expected safe UI/API states and exact replay, then
 run focused/full tests locally. No push, merge or PR.
+
+## Acceptance record
+
+- Five synthetic cases passed through the durable services and real local
+  employee/manager HTTP page projections.
+- Exact report, payment and manager-decision replay created no duplicate state
+  and invoked inference once.
+- Focused acceptance: 2/2; related closure/workspace/dashboard tests: 13/13.
+- Full regression: 382/382; persisted closure demo passed.
+- Command-line output contains only bounded case/status vocabulary.
