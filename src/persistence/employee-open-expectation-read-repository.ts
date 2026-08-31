@@ -1,5 +1,6 @@
 import { assertActorAccess } from "../domain/access-context.ts";
 import type { ActorContext } from "../domain/contracts.ts";
+import { isEyeExamFlowKind, type EyeExamFlowKind } from "../domain/eye-exam-flow-policy.ts";
 import { DomainError } from "../domain/errors.ts";
 import type { DatabasePool } from "./database-contracts.ts";
 import { parseStrictIsoInstant } from "./strict-timestamp.ts";
@@ -8,7 +9,7 @@ import { withTenantTransaction } from "./tenant-transaction.ts";
 export type EmployeeOpenExpectationItem = {
   expectationId: string;
   workflowFamily: string;
-  consequenceKind: "EXAM_REPORT";
+  consequenceKind: EyeExamFlowKind;
   dueAt: string;
   state: "OPEN";
 };
@@ -40,8 +41,19 @@ export class EmployeeOpenExpectationReadRepository {
     context: ActorContext,
     rawQuery: EmployeeOpenExpectationQuery,
   ): Promise<EmployeeOpenExpectationPage> {
-    const captured = structuredClone({ context, query: rawQuery });
+    return this.listOpenFlowExpectations(context, rawQuery, "EXAM_REPORT");
+  }
+
+  async listOpenFlowExpectations(
+    context: ActorContext,
+    rawQuery: EmployeeOpenExpectationQuery,
+    consequenceKind: EyeExamFlowKind,
+  ): Promise<EmployeeOpenExpectationPage> {
+    const captured = structuredClone({ context, query: rawQuery, consequenceKind });
     assertActorAccess(captured.context, captured.context.clinicId, "EMPLOYEE");
+    if (!isEyeExamFlowKind(captured.consequenceKind)) {
+      throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
+    }
     const query = validateQuery(captured.query);
     const rows = await withTenantTransaction(this.#pool, captured.context.clinicId, async (client) => {
       const result = await client.query<Row>(`
@@ -69,7 +81,7 @@ export class EmployeeOpenExpectationReadRepository {
            AND trigger_artifact.source_employee_id = $2
            AND e.state = 'OPEN'
            AND w.status = 'OPEN'
-           AND e.consequence_kind = 'EXAM_REPORT'
+           AND e.consequence_kind = $7
            AND e.triggered_at <= $3::timestamptz
            AND $3::timestamptz < e.due_at
            AND ($4::timestamptz IS NULL OR e.due_at > $4::timestamptz
@@ -78,11 +90,12 @@ export class EmployeeOpenExpectationReadRepository {
          LIMIT $6`, [
         captured.context.clinicId, captured.context.actorId, query.asOf,
         query.cursor?.dueAt ?? null, query.cursor?.expectationId ?? "", query.limit + 1,
+        captured.consequenceKind,
       ]);
       return result.rows;
     });
     const more = rows.length > query.limit;
-    const visible = rows.slice(0, query.limit).map(toItem);
+    const visible = rows.slice(0, query.limit).map((row) => toItem(row, captured.consequenceKind));
     const last = visible.at(-1);
     return structuredClone({
       items: visible,
@@ -108,14 +121,14 @@ function validateQuery(value: unknown): { asOf: string; limit: number; cursor: C
   return { asOf: value.asOf, limit, cursor: value.cursor === undefined ? undefined : decodeCursor(value.cursor) };
 }
 
-function toItem(row: Row): EmployeeOpenExpectationItem {
+function toItem(row: Row, consequenceKind: EyeExamFlowKind): EmployeeOpenExpectationItem {
   let dueAt: string;
   try { dueAt = new Date(row.due_at).toISOString(); }
   catch { throw new DomainError("INCONSISTENT_EXPECTATION_LINEAGE", "Stored expectation lineage is inconsistent."); }
   if (!isOpaqueId(row.id) || typeof row.workflow_family !== "string" || !row.workflow_family || row.workflow_family.length > 128) {
     throw new DomainError("INCONSISTENT_EXPECTATION_LINEAGE", "Stored expectation lineage is inconsistent.");
   }
-  return { expectationId: row.id, workflowFamily: row.workflow_family, consequenceKind: "EXAM_REPORT", dueAt, state: "OPEN" };
+  return { expectationId: row.id, workflowFamily: row.workflow_family, consequenceKind, dueAt, state: "OPEN" };
 }
 
 function encodeCursor(cursor: Cursor): string {
