@@ -166,6 +166,11 @@ export class ManagerDecisionRepository {
       if (expectation.state === "VOIDED") {
         throw new DomainError("EXPECTATION_TERMINAL", "A voided Expectation is terminal.");
       }
+      if (command.action.startsWith("CLOSE_") && await hasOtherOpenExpectation(
+        client, captured.context.clinicId, workflow.id, expectation.id,
+      )) {
+        throw new DomainError("WORKFLOW_EXPECTATIONS_OPEN", "A Workflow with pending expectations cannot be closed.");
+      }
 
       const transition = await findCurrentTransition(client, captured.context.clinicId, expectation);
       if (!transition) {
@@ -264,6 +269,23 @@ export class ManagerDecisionRepository {
       return structuredClone({ decision: storedDecision, workflow, expectation });
     });
   }
+}
+
+async function hasOtherOpenExpectation(
+  client: TenantQueryClient,
+  clinicId: string,
+  workflowId: string,
+  expectationId: string,
+): Promise<boolean> {
+  const result = await client.query<{ id: string }>(`
+    SELECT id
+      FROM expectation
+     WHERE clinic_id = $1
+       AND workflow_id = $2
+       AND id <> $3
+       AND state IN ('OPEN', 'UNMET')
+     LIMIT 1`, [clinicId, workflowId, expectationId]);
+  return result.rows.length !== 0;
 }
 
 function validateInput(

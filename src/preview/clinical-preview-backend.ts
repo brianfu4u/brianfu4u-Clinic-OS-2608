@@ -58,6 +58,10 @@ export interface ClinicalPreviewBackend {
     context: ActorContext,
     query: EmployeeOpenExpectationQuery,
   ): Promise<EmployeeOpenExpectationPage>;
+  listOpenPaymentExpectations?(
+    context: ActorContext,
+    query: EmployeeOpenExpectationQuery,
+  ): Promise<EmployeeOpenExpectationPage>;
   createRegistrationTrigger?(
     context: ActorContext,
     input: ClinicalRegistrationTriggerInput,
@@ -117,6 +121,14 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     return this.#openExpectations.listOpenExamReportExpectations(context, query);
   }
 
+  listOpenPaymentExpectations(
+    context: ActorContext,
+    query: EmployeeOpenExpectationQuery,
+  ): Promise<EmployeeOpenExpectationPage> {
+    assertActorAccess(context, context.clinicId, "EMPLOYEE");
+    return this.#openExpectations.listOpenFlowExpectations(context, query, "PAYMENT");
+  }
+
   async uploadEvidenceObject(
     context: ActorContext,
     input: EvidenceObjectIngestionInput,
@@ -152,7 +164,41 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     if (!selected && !(await this.#extractionPath.canResumeExisting(capturedContext, capturedCommand))) {
       throw new DomainError("EXPECTATION_SELECTION_REQUIRED", "A current employee expectation selection is required.");
     }
-    return this.#extractionPath.processGoldenPath(capturedContext, capturedCommand);
+    const result = await this.#extractionPath.processGoldenPath(capturedContext, capturedCommand);
+    if (result.status !== "COMPLETED" ||
+        result.goldenPath.expectation.expectation.state !== "MET" ||
+        result.goldenPath.verification.result.status !== "VERIFIED") {
+      return result;
+    }
+
+    // An accepted report is the only authority that can establish the payment
+    // stage. The client never supplies a payment identifier, amount, or
+    // browser-selected expectation: this deterministic trigger reuses the
+    // durable report capture and exact extraction identity.
+    const occurredAt = result.extraction.artifact.occurredAt;
+    const next = occurredAt === null ? null : nextEyeExamExpectation("EXAM_REPORT", occurredAt);
+    if (!next) {
+      throw new DomainError("INVALID_FLOW_POLICY", "A verified exam report must create a payment expectation.");
+    }
+    const payment = await this.#path.recordTrigger(capturedContext, {
+      artifact: result.extraction.artifact,
+      factCard: result.extraction.factCard,
+      expectation: {
+        id: stableId("expectation", capturedContext, `${capturedCommand.extraction.requestId}:payment`),
+        triggerKind: next.triggerKind,
+        consequenceKind: next.consequenceKind,
+        triggeredAt: occurredAt,
+        dueAt: next.dueAt,
+      },
+      attachedAt: capturedCommand.operation.attachedAt,
+      evaluatedAt: capturedCommand.operation.evaluatedAt,
+    });
+    if (payment.status === "REVIEW_REQUIRED" ||
+        (payment.expectation.expectation.state !== "OPEN" && payment.expectation.expectation.state !== "UNMET") ||
+        payment.verification.result.status !== "PENDING") {
+      throw new DomainError("INVALID_PAYMENT_STAGE", "Verified exam report did not establish a pending payment expectation.");
+    }
+    return result;
   }
 
   async createRegistrationTrigger(

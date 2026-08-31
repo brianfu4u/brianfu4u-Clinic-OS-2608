@@ -14,17 +14,16 @@ function code(expected: string) {
 test("persisted closure demo uses only durable production seams and stage replays do not duplicate rows", async () => {
   const summary = await runPersistedClosureDemo();
   assert.deepEqual(summary, {
-    phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"],
+    phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "REPLAY"],
     registration: "OPEN",
     extraction: "READY",
     verification: "VERIFIED",
-    closure: "CLOSED",
-    decision: "CLOSE_STANDARD",
+    payment: "OPEN",
     reviewRequired: false,
     inferenceCalls: 1,
     counts: {
-      artifacts: 3, factCards: 3, workflows: 1, links: 3, expectations: 2,
-      storedObjects: 1, extractionAttempts: 1, verifications: 4, decisions: 1,
+      artifacts: 3, factCards: 3, workflows: 1, links: 3, expectations: 3,
+      storedObjects: 1, extractionAttempts: 1, verifications: 5, decisions: 0,
     },
   });
 });
@@ -55,6 +54,49 @@ test("REVIEW_REQUIRED extraction is durable but cannot complete or standard-clos
   } finally { await harness.dispose(); }
 });
 
+test("only a verified report creates one employee-safe pending payment expectation", async () => {
+  const harness = await createPersistedClosureHarness();
+  try {
+    await harness.register();
+    await harness.prescribe();
+    const report = await harness.selectOpenExpectation();
+    const object = await harness.upload();
+    const first = await harness.submit(report.expectationId, object) as {
+      status: string; goldenPath: { expectation: { expectation: { state: string } }; verification: { result: { status: string } } };
+    };
+    assert.equal(first.status, "COMPLETED");
+    assert.equal(first.goldenPath.expectation.expectation.state, "MET");
+    assert.equal(first.goldenPath.verification.result.status, "VERIFIED");
+    const payment = await harness.selectOpenPaymentExpectation();
+    assert.equal(payment.dueAt, "2026-08-30T09:30:00.000Z");
+    const beforeReplay = await harness.counts();
+    await harness.submit(report.expectationId, object);
+    assert.deepEqual(await harness.counts(), beforeReplay);
+    const replayPayment = await harness.selectOpenPaymentExpectation();
+    assert.deepEqual(replayPayment, payment);
+    await assert.rejects(harness.selectOpenPaymentExpectation(harness.otherEmployee), code("CLOSURE_DEMO_PAYMENT_SELECTION_FAILED"));
+    await assert.rejects(harness.selectOpenPaymentExpectation(harness.otherClinicEmployee), code("CLOSURE_DEMO_PAYMENT_SELECTION_FAILED"));
+  } finally { await harness.dispose(); }
+});
+
+test("conflicting report evidence cannot create a payment expectation", async () => {
+  const harness = await createPersistedClosureHarness();
+  try {
+    await harness.register();
+    await harness.prescribe();
+    const report = await harness.selectOpenExpectation();
+    const object = await harness.upload();
+    const result = await harness.submit(report.expectationId, object, {
+      occurredAt: "2026-08-30T09:04:00.000Z",
+    }) as { status: string; goldenPath: { expectation: { expectation: { state: string } }; verification: { result: { status: string } } } };
+    assert.equal(result.status, "COMPLETED");
+    assert.equal(result.goldenPath.expectation.expectation.state, "OPEN");
+    assert.equal(result.goldenPath.verification.result.status, "CONFLICT");
+    await assert.rejects(harness.selectOpenPaymentExpectation(), code("CLOSURE_DEMO_PAYMENT_SELECTION_FAILED"));
+    assert.equal((await harness.counts()).expectations, 2);
+  } finally { await harness.dispose(); }
+});
+
 test("employee selection, storage, extraction and manager operations remain role and tenant scoped", async () => {
   const harness = await createPersistedClosureHarness();
   try {
@@ -82,17 +124,12 @@ test("changed replay bindings fail visibly and do not alter the finished durable
     const selected = await harness.selectOpenExpectation();
     const object = await harness.upload();
     await harness.submit(selected.expectationId, object);
-    await harness.close(selected.expectationId);
     const before = await harness.counts();
     await assert.rejects(harness.upload(new Uint8Array([1, 2, 3])), code("OBJECT_ID_CONFLICT"));
-    await assert.rejects(harness.close(selected.expectationId, "KEEP_OPEN"), code("DECISION_ID_CONFLICT"));
+    await assert.rejects(harness.close(selected.expectationId), code("WORKFLOW_EXPECTATIONS_OPEN"));
     assert.deepEqual(await harness.counts(), before);
-    const projection = await harness.backend.listManagerClosures(harness.manager);
-    const closed = projection.find((item) => item.expectationId === selected.expectationId);
-    assert.deepEqual({ workflow: closed?.workflowStatus, action: closed?.latestDecision?.action, review: closed?.needsReview }, {
-      workflow: "CLOSED", action: "CLOSE_STANDARD", review: false,
-    });
-    assert.equal(projection.some((item) => item.needsReview), false);
+    const payment = await harness.selectOpenPaymentExpectation();
+    assert.notEqual(payment.expectationId, selected.expectationId);
   } finally { await harness.dispose(); }
 });
 

@@ -64,12 +64,11 @@ type Counts = {
 };
 
 export type PersistedClosureSummary = {
-  phases: readonly ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"];
+  phases: readonly ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "REPLAY"];
   registration: "OPEN";
   extraction: "READY";
   verification: "VERIFIED";
-  closure: "CLOSED";
-  decision: "CLOSE_STANDARD";
+  payment: "OPEN";
   reviewRequired: false;
   inferenceCalls: number;
   counts: Counts;
@@ -130,6 +129,7 @@ export interface PersistedClosureHarness {
   readonly otherEmployee: ActorContext;
   readonly otherClinicEmployee: ActorContext;
   selectOpenExpectation(context?: ActorContext): Promise<{ expectationId: string; dueAt: string }>;
+  selectOpenPaymentExpectation(context?: ActorContext): Promise<{ expectationId: string; dueAt: string }>;
   register(): Promise<void>;
   prescribe(): Promise<void>;
   upload(bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
@@ -210,6 +210,13 @@ export async function createPersistedClosureHarness(candidate: ExtractionCandida
       }
       return structuredClone({ expectationId: page.items[0].expectationId, dueAt: page.items[0].dueAt });
     },
+    async selectOpenPaymentExpectation(context = EMPLOYEE) {
+      const page = await backend.listOpenPaymentExpectations!(context, { asOf: REPORT_OPERATION_AT, limit: 2 });
+      if (page.items.length !== 1 || page.nextCursor !== null || page.items[0].state !== "OPEN" || page.items[0].consequenceKind !== "PAYMENT") {
+        throw new DomainError("CLOSURE_DEMO_PAYMENT_SELECTION_FAILED", "Employee selection did not return exactly one open payment expectation.");
+      }
+      return structuredClone({ expectationId: page.items[0].expectationId, dueAt: page.items[0].dueAt });
+    },
     async upload(bytes = FIXTURE_BYTES, key = "closure-upload-0001") {
       return backend.uploadEvidenceObject!(EMPLOYEE, { idempotencyKey: key, mediaType: "image/png", bytes: new Uint8Array(bytes) });
     },
@@ -278,29 +285,14 @@ export async function runPersistedClosureDemo(): Promise<PersistedClosureSummary
     }
     await harness.submit(selected.expectationId, objectRef);
     if (harness.provider.calls !== 1) throw new DomainError("CLOSURE_DEMO_REPLAY_FAILED", "Durable extraction replay invoked inference.");
-    const beforeClose = (await harness.backend.listManagerClosures(harness.manager))
-      .find((item) => item.expectationId === selected.expectationId);
-    if (!beforeClose || beforeClose.workflowStatus !== "OPEN" || beforeClose.expectationState !== "MET" ||
-        beforeClose.verificationStatus !== "VERIFIED" || beforeClose.needsReview) {
-      throw new DomainError("CLOSURE_DEMO_PROJECTION_FAILED", "Manager projection was not closure-ready.");
-    }
-    await harness.close(selected.expectationId);
-    const firstClosedProjection = await harness.backend.listManagerClosures(harness.manager);
-    await harness.close(selected.expectationId);
-    const projection = await harness.backend.listManagerClosures(harness.manager);
-    const closed = projection.find((item) => item.expectationId === selected.expectationId);
-    if (!closed || closed.workflowStatus !== "CLOSED" || closed.expectationState !== "MET" ||
-        closed.verificationStatus !== "VERIFIED" || closed.latestDecision?.action !== "CLOSE_STANDARD" || closed.needsReview ||
-        projection.some((item) => item.needsReview)) {
-      throw new DomainError("CLOSURE_DEMO_CLOSE_FAILED", "Manager close did not produce a closed projection.");
-    }
-    if (JSON.stringify(projection) !== JSON.stringify(firstClosedProjection)) {
-      throw new DomainError("CLOSURE_DEMO_REPLAY_FAILED", "Manager decision replay changed the closure projection.");
+    const payment = await harness.selectOpenPaymentExpectation();
+    if (payment.dueAt !== "2026-08-30T09:30:00.000Z") {
+      throw new DomainError("CLOSURE_DEMO_PAYMENT_FAILED", "Unexpected server-derived payment due time.");
     }
     return Object.freeze({
-      phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"],
-      registration: "OPEN", extraction: "READY", verification: "VERIFIED", closure: "CLOSED",
-      decision: "CLOSE_STANDARD", reviewRequired: false, inferenceCalls: harness.provider.calls,
+      phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "PAYMENT", "REPLAY"],
+      registration: "OPEN", extraction: "READY", verification: "VERIFIED", payment: "OPEN",
+      reviewRequired: false, inferenceCalls: harness.provider.calls,
       counts: await harness.counts(),
     });
   } finally {
