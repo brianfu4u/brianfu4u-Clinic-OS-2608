@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { DomainError } from "../domain/errors.ts";
 import {
   TESSERACT_MODEL_MANIFEST_SHA256,
+  TESSERACT_MODEL_MANIFEST_FILE,
   TESSERACT_OCR_MODEL_ID,
   validateTesseractAssetPathChainSync,
   validateTesseractCheckedInManifestSync,
@@ -18,7 +19,7 @@ import { LocalObjectStore } from "../storage/local-object-store.ts";
 import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
 
 export const CLINICAL_CAPABILITY = "EXTRACT_EYE_EXAM_REPORT" as const;
-const MANIFEST_FILE = fileURLToPath(new URL("../../models/tesseract-eng-v1.manifest.json", import.meta.url));
+const MANIFEST_FILE = fileURLToPath(new URL(`../../models/${TESSERACT_MODEL_MANIFEST_FILE}`, import.meta.url));
 
 export type StartupMode = "SYNTHETIC_PREVIEW" | "CONFIGURED";
 

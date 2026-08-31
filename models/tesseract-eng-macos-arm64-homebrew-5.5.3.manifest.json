@@ -1,0 +1,17 @@
+{
+  "manifestVersion": "tesseract-model-manifest-v1",
+  "modelId": "tesseract-eng-eye-exam-macos-arm64-homebrew-5.5.3-v1",
+  "engineName": "tesseract",
+  "engineVersion": "5.5.3",
+  "leptonicaVersion": "1.87.0",
+  "purpose": "local-macos-arm64-english-eye-exam-ocr-smoke",
+  "executableSha256": "16020f485da1f534089d82608797d98f71322c67dee772438fb755ad9b4f79b5",
+  "engTraineddataSha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+  "tsvConfigSha256": "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04",
+  "language": "eng",
+  "licenseSpdx": "Apache-2.0",
+  "schemaVersion": "eye-exam-candidate-v1",
+  "minimumHardware": "Apple Silicon (arm64); 512 MiB available memory",
+  "rollbackModelId": "disabled",
+  "offlinePackageReference": "clinic-os-tesseract-eng-macos-arm64-homebrew-5.5.3-v1"
+}

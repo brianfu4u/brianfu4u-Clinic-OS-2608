@@ -41,6 +41,18 @@ CLINIC_OS_INFERENCE_CAPABILITIES=EXTRACT_EYE_EXAM_REPORT \
 npm run preview
 ```
 
+### macOS Apple Silicon local test profile
+
+The approved M1/M2/M3 test profile pins Homebrew Tesseract 5.5.3 and its exact English assets.
+After installing PostgreSQL 17, creating `clinic_os_local`, and running `npm run db:migrate`, start it with:
+
+```bash
+bash scripts/start-macos-local.sh
+```
+
+It is a local, non-PHI test profile. Homebrew upgrades are intentionally rejected until their
+asset manifest has been reviewed and released.
+
 This startup path does not run migrations. A missing database URL, local object-store root,
 or OCR path fails startup and never falls back to the in-memory clinical backend. The persisted
 extraction route is therefore never advertised by a server that only has a database pool.

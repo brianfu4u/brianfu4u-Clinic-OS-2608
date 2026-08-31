@@ -12,6 +12,7 @@ import { DomainError } from "../src/domain/errors.ts";
 import type { InferenceRequest } from "../src/runtime/contracts.ts";
 import {
   FROZEN_TESSERACT_MANIFEST,
+  TESSERACT_MODEL_MANIFEST_FILE,
   TESSERACT_OCR_MODEL_ID,
   TESSERACT_OCR_SCHEMA_VERSION,
   TesseractOcrProvider,
@@ -73,12 +74,12 @@ test("production config rejects runner and manifest trust injection", () => {
   ]) assert.throws(() => new TesseractOcrProvider(config as never), hasCode("OCR_MODEL_UNAVAILABLE"));
   assert.equal(Object.isFrozen(FROZEN_TESSERACT_MANIFEST), true);
   assert.equal(FROZEN_TESSERACT_MANIFEST.modelId, TESSERACT_OCR_MODEL_ID);
-  assert.equal(FROZEN_TESSERACT_MANIFEST.minimumHardware, "x86_64 CPU; 512 MiB available memory");
-  assert.equal(FROZEN_TESSERACT_MANIFEST.offlinePackageReference, "clinic-os-tesseract-eng-v1");
+  assert.match(FROZEN_TESSERACT_MANIFEST.minimumHardware, /512 MiB available memory/);
+  assert.match(FROZEN_TESSERACT_MANIFEST.offlinePackageReference, /^clinic-os-tesseract-eng-/);
 });
 
 test("checked-in Tesseract manifest is exact, hashed and fail-closed on mutation or replacement", async (t) => {
-  const source = new URL("../models/tesseract-eng-v1.manifest.json", import.meta.url);
+  const source = new URL(`../models/${TESSERACT_MODEL_MANIFEST_FILE}`, import.meta.url);
   // /tmp is intentionally world-writable and therefore rejected by the same
   // complete-ancestry gate used in production. A user-owned home directory is
   // also trusted when its ancestry is not group/world writable, so it keeps

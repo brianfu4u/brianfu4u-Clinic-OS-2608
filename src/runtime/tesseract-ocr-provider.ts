@@ -19,9 +19,13 @@ import type { ActorContext } from "../domain/contracts.ts";
 import { DomainError } from "../domain/errors.ts";
 import type { InferenceProvider, InferenceRequest, InferenceResponse } from "./contracts.ts";
 
-export const TESSERACT_OCR_MODEL_ID = "tesseract-eng-eye-exam-v1";
 export const TESSERACT_OCR_SCHEMA_VERSION = "eye-exam-candidate-v1";
-export const TESSERACT_MODEL_MANIFEST_SHA256 = "8ccd734c69eb6dc4ce8f78ee1aa5cf66c39a2e92b544bebd2fa088aa34162951";
+export const TESSERACT_MODEL_MANIFEST_FILE = process.platform === "darwin" && process.arch === "arm64"
+  ? "tesseract-eng-macos-arm64-homebrew-5.5.3.manifest.json"
+  : "tesseract-eng-v1.manifest.json";
+export const TESSERACT_MODEL_MANIFEST_SHA256 = process.platform === "darwin" && process.arch === "arm64"
+  ? "0c1df87ca1f9bc766165dbe5f9edb0e5e19e8704d5c31e23c6b847ca996ddc0b"
+  : "8ccd734c69eb6dc4ce8f78ee1aa5cf66c39a2e92b544bebd2fa088aa34162951";
 
 const CAPABILITY = "EXTRACT_EYE_EXAM_REPORT";
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -48,9 +52,9 @@ export interface TesseractModelManifest {
   offlinePackageReference: string;
 }
 
-export const FROZEN_TESSERACT_MANIFEST: Readonly<TesseractModelManifest> = Object.freeze({
+const LINUX_TESSERACT_MANIFEST: TesseractModelManifest = {
   manifestVersion: "tesseract-model-manifest-v1",
-  modelId: TESSERACT_OCR_MODEL_ID,
+  modelId: "tesseract-eng-eye-exam-v1",
   engineName: "tesseract",
   engineVersion: "5.3.4",
   leptonicaVersion: "1.82.0",
@@ -64,7 +68,32 @@ export const FROZEN_TESSERACT_MANIFEST: Readonly<TesseractModelManifest> = Objec
   minimumHardware: "x86_64 CPU; 512 MiB available memory",
   rollbackModelId: "disabled",
   offlinePackageReference: "clinic-os-tesseract-eng-v1",
-});
+};
+
+const MACOS_ARM64_TESSERACT_MANIFEST: TesseractModelManifest = {
+  manifestVersion: "tesseract-model-manifest-v1",
+  modelId: "tesseract-eng-eye-exam-macos-arm64-homebrew-5.5.3-v1",
+  engineName: "tesseract",
+  engineVersion: "5.5.3",
+  leptonicaVersion: "1.87.0",
+  purpose: "local-macos-arm64-english-eye-exam-ocr-smoke",
+  executableSha256: "16020f485da1f534089d82608797d98f71322c67dee772438fb755ad9b4f79b5",
+  engTraineddataSha256: "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+  tsvConfigSha256: "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04",
+  language: "eng",
+  licenseSpdx: "Apache-2.0",
+  schemaVersion: TESSERACT_OCR_SCHEMA_VERSION,
+  minimumHardware: "Apple Silicon (arm64); 512 MiB available memory",
+  rollbackModelId: "disabled",
+  offlinePackageReference: "clinic-os-tesseract-eng-macos-arm64-homebrew-5.5.3-v1",
+};
+
+export const FROZEN_TESSERACT_MANIFEST: Readonly<TesseractModelManifest> = Object.freeze(
+  TESSERACT_MODEL_MANIFEST_FILE === "tesseract-eng-macos-arm64-homebrew-5.5.3.manifest.json"
+    ? MACOS_ARM64_TESSERACT_MANIFEST
+    : LINUX_TESSERACT_MANIFEST,
+);
+export const TESSERACT_OCR_MODEL_ID = FROZEN_TESSERACT_MANIFEST.modelId;
 
 const TESSERACT_MANIFEST_KEYS = Object.freeze([
   "engTraineddataSha256", "engineName", "engineVersion", "executableSha256",
