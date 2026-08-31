@@ -152,6 +152,9 @@ async function readClosures(
   for (const workflowRow of workflows) {
     const workflow = workflowFromRow(workflowRow);
     const current = expectations.filter((row) => row.workflow_id === workflow.id);
+    const workflowDecisions = decisions.filter((decision) => decision.workflow_id === workflow.id);
+    const hasTerminalDecision = workflowDecisions.some((decision) =>
+      decision.action === "CLOSE_STANDARD" || decision.action === "CLOSE_EXCEPTION" || decision.action === "VOID");
     const evidence = links.filter((row) => row.workflow_id === workflow.id).map((row) => row.artifact_id);
     if (new Set(evidence).size !== evidence.length) invalidStored();
     if (current.length === 0) {
@@ -197,7 +200,7 @@ async function readClosures(
       const view = projectManagerClosure({ workflow, expectation, evidenceArtifactIds: itemEvidence, verification });
       const reasonCodes = [...view.reasonCodes];
       if (workflow.status === "OPEN" && !verification) reasonCodes.push("VERIFICATION_MISSING");
-      if (workflow.status !== "OPEN" && !latest) reasonCodes.push("TERMINAL_DECISION_MISSING");
+      if (workflow.status !== "OPEN" && !hasTerminalDecision) reasonCodes.push("TERMINAL_DECISION_MISSING");
       output.push({
         workflowId: workflow.id, workflowStatus: workflow.status,
         identityAnchor: workflow.identityAnchor, workflowFamily: workflow.workflowFamily,

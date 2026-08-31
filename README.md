@@ -2,6 +2,10 @@
 
 Clinic OS turns clinic artifacts into traceable workflows and manager closure views.
 
+Start with the [engineering handoff](docs/ENGINEERING_HANDOFF.md) for current capabilities and gaps.
+The product authority is [the Constitution](docs/CONSTITUTION.md); implementation slices live in
+[docs/work-orders](docs/work-orders).
+
 This repository contains the WO-001 in-memory domain tracer, the WO-002 local preview shell,
 and the WO-003 append-only human decision ledger:
 

@@ -33,7 +33,9 @@ import { ObjectStoreGateway } from "../src/storage/object-store-gateway.ts";
 const FIXTURE_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
 const REGISTRATION_OCCURRED_AT = "2026-08-30T09:00:00.000Z";
 const REGISTRATION_OPERATION_AT = "2026-08-30T09:01:00.000Z";
-const SELECTION_AT = "2026-08-30T09:05:00.000Z";
+const PRESCRIPTION_OCCURRED_AT = "2026-08-30T09:05:00.000Z";
+const PRESCRIPTION_OPERATION_AT = "2026-08-30T09:06:00.000Z";
+const SELECTION_AT = "2026-08-30T09:07:00.000Z";
 const REPORT_OCCURRED_AT = "2026-08-30T09:10:00.000Z";
 const REPORT_CREATED_AT = "2026-08-30T09:10:30.000Z";
 const INFERENCE_COMPLETED_AT = "2026-08-30T09:10:40.000Z";
@@ -62,7 +64,7 @@ type Counts = {
 };
 
 export type PersistedClosureSummary = {
-  phases: readonly ["REGISTRATION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"];
+  phases: readonly ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"];
   registration: "OPEN";
   extraction: "READY";
   verification: "VERIFIED";
@@ -129,6 +131,7 @@ export interface PersistedClosureHarness {
   readonly otherClinicEmployee: ActorContext;
   selectOpenExpectation(context?: ActorContext): Promise<{ expectationId: string; dueAt: string }>;
   register(): Promise<void>;
+  prescribe(): Promise<void>;
   upload(bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
   uploadAs(context: ActorContext, bytes?: Uint8Array, key?: string): Promise<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>;
   command(expectationId: string, objectRef: Awaited<ReturnType<PostgresClinicalPreviewBackend["uploadEvidenceObject"]>>, overrides?: Partial<{
@@ -187,6 +190,17 @@ export async function createPersistedClosureHarness(candidate: ExtractionCandida
       });
       if (result.status !== "COMPLETED" || result.expectationState !== "OPEN" || result.verificationStatus !== "PENDING") {
         throw new DomainError("CLOSURE_DEMO_REGISTRATION_FAILED", "Registration did not establish the expected pending chain.");
+      }
+    },
+    async prescribe() {
+      const result = await backend.createPrescriptionTrigger!(EMPLOYEE, {
+        identityAnchor: SYNTHETIC_ANCHOR,
+        occurredAt: PRESCRIPTION_OCCURRED_AT,
+        receivedAt: PRESCRIPTION_OPERATION_AT,
+        idempotencyKey: "closure-prescription-0001",
+      });
+      if (result.status !== "COMPLETED" || result.expectationState !== "OPEN" || result.verificationStatus !== "PENDING") {
+        throw new DomainError("CLOSURE_DEMO_PRESCRIPTION_FAILED", "Prescription did not establish the expected report stage.");
       }
     },
     async selectOpenExpectation(context = EMPLOYEE) {
@@ -252,8 +266,10 @@ export async function runPersistedClosureDemo(): Promise<PersistedClosureSummary
     // Registration is replayed while its state is still OPEN. Later state progression is deliberately
     // not hidden by a fake fresh registration command.
     await harness.register();
+    await harness.prescribe();
+    await harness.prescribe();
     const selected = await harness.selectOpenExpectation();
-    if (selected.dueAt !== "2026-08-30T09:15:00.000Z") throw new DomainError("CLOSURE_DEMO_DUE_FAILED", "Unexpected server-derived due time.");
+    if (selected.dueAt !== "2026-08-30T09:35:00.000Z") throw new DomainError("CLOSURE_DEMO_DUE_FAILED", "Unexpected server-derived due time.");
     const objectRef = await harness.upload();
     await harness.upload();
     const consequence = await harness.submit(selected.expectationId, objectRef) as { status: string; extraction: { status: string }; goldenPath: { verification: { result: { status: string } } } };
@@ -262,24 +278,27 @@ export async function runPersistedClosureDemo(): Promise<PersistedClosureSummary
     }
     await harness.submit(selected.expectationId, objectRef);
     if (harness.provider.calls !== 1) throw new DomainError("CLOSURE_DEMO_REPLAY_FAILED", "Durable extraction replay invoked inference.");
-    const beforeClose = await harness.backend.listManagerClosures(harness.manager);
-    if (beforeClose.length !== 1 || beforeClose[0].workflowStatus !== "OPEN" || beforeClose[0].expectationState !== "MET" ||
-        beforeClose[0].verificationStatus !== "VERIFIED" || beforeClose[0].needsReview) {
+    const beforeClose = (await harness.backend.listManagerClosures(harness.manager))
+      .find((item) => item.expectationId === selected.expectationId);
+    if (!beforeClose || beforeClose.workflowStatus !== "OPEN" || beforeClose.expectationState !== "MET" ||
+        beforeClose.verificationStatus !== "VERIFIED" || beforeClose.needsReview) {
       throw new DomainError("CLOSURE_DEMO_PROJECTION_FAILED", "Manager projection was not closure-ready.");
     }
     await harness.close(selected.expectationId);
     const firstClosedProjection = await harness.backend.listManagerClosures(harness.manager);
     await harness.close(selected.expectationId);
     const projection = await harness.backend.listManagerClosures(harness.manager);
-    if (projection.length !== 1 || projection[0].workflowStatus !== "CLOSED" || projection[0].expectationState !== "MET" ||
-        projection[0].verificationStatus !== "VERIFIED" || projection[0].latestDecision?.action !== "CLOSE_STANDARD" || projection[0].needsReview) {
+    const closed = projection.find((item) => item.expectationId === selected.expectationId);
+    if (!closed || closed.workflowStatus !== "CLOSED" || closed.expectationState !== "MET" ||
+        closed.verificationStatus !== "VERIFIED" || closed.latestDecision?.action !== "CLOSE_STANDARD" || closed.needsReview ||
+        projection.some((item) => item.needsReview)) {
       throw new DomainError("CLOSURE_DEMO_CLOSE_FAILED", "Manager close did not produce a closed projection.");
     }
     if (JSON.stringify(projection) !== JSON.stringify(firstClosedProjection)) {
       throw new DomainError("CLOSURE_DEMO_REPLAY_FAILED", "Manager decision replay changed the closure projection.");
     }
     return Object.freeze({
-      phases: ["REGISTRATION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"],
+      phases: ["REGISTRATION", "PRESCRIPTION", "SELECTION", "UPLOAD", "EXTRACTION", "VERIFICATION", "MANAGER_CLOSE", "REPLAY"],
       registration: "OPEN", extraction: "READY", verification: "VERIFIED", closure: "CLOSED",
       decision: "CLOSE_STANDARD", reviewRequired: false, inferenceCalls: harness.provider.calls,
       counts: await harness.counts(),
