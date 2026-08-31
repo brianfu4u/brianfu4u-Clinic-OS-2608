@@ -1,6 +1,6 @@
 # WO-033 — Persisted Exam Report to Payment Stage
 
-**Status:** Architecture frozen / Builder active  
+**Status:** Accepted — Architecture Review passed 2026-08-31  
 **Depends on:** Constitution; WO-032
 
 ## Goal
@@ -38,3 +38,15 @@ a browser-authority field.
 - Prove every negative path above leaves no payment expectation.
 - Run focused flow/preview/closure tests, `npm test`, demos and `git diff --check`.
 - Keep all work local: no push, merge or PR.
+
+## Acceptance result
+
+Independent acceptance passed on 2026-08-31:
+
+- `npm test`: 362/362 passing;
+- persisted closure demo: passing, including exact report replay and one
+  employee-safe `PAYMENT OPEN/PENDING` expectation;
+- cross-employee, cross-clinic and conflicting-report negative paths: passing;
+- manager close is rejected while any other Workflow expectation remains
+  `OPEN` or `UNMET`;
+- no push, merge or PR was performed.
