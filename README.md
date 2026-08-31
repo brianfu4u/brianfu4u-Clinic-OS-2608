@@ -54,6 +54,15 @@ After installing PostgreSQL 17, creating `clinic_os_local`, and running `npm run
 bash scripts/start-macos-local.sh
 ```
 
+The local clinical preview starts as the reception workspace. For a separate
+doctor, exam, or cashier session, restart it with a server-controlled workspace
+value (the browser cannot change this):
+
+```bash
+CLINIC_OS_PREVIEW_WORKSPACE=DOCTOR bash scripts/start-macos-local.sh
+# valid values: RECEPTION, DOCTOR, EXAM, CASHIER
+```
+
 It is a local, non-PHI test profile. Homebrew upgrades are intentionally rejected until their
 asset manifest has been reviewed and released.
 

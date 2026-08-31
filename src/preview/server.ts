@@ -46,6 +46,8 @@ const OPEN_EXPECTATIONS_PATH = "/api/employee/open-expectations";
 const REGISTRATION_TRIGGER_PATH = "/api/employee/registration-trigger";
 const PRESCRIPTION_TRIGGER_PATH = "/api/employee/prescription-trigger";
 const PAYMENT_TRIGGER_PATH = "/api/employee/payment-trigger";
+export type EmployeeWorkspace = "RECEPTION" | "DOCTOR" | "EXAM" | "CASHIER";
+type EmployeeWorkspaceScope = EmployeeWorkspace | "ALL";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024 + 1024 * 1024;
 const MAX_UPLOAD_HEADER_BYTES = 16 * 1024;
@@ -63,6 +65,12 @@ export function createPreviewServer(options: {
   store?: PreviewStore;
   clock?: () => string;
   employeeContext?: ActorContext;
+  /**
+   * This is supplied by the server/session construction point, never by the
+   * browser.  Production authentication may later derive the same value from
+   * a staff assignment; the local preview keeps it explicit and bounded.
+   */
+  employeeWorkspace?: EmployeeWorkspace;
   managerContext?: ActorContext;
   clinicalBackend?: ClinicalPreviewBackend;
   extractionBodyTimeoutMs?: number;
@@ -82,6 +90,10 @@ export function createPreviewServer(options: {
     actorId: "demo-manager",
     role: "MANAGER",
   };
+  // Existing programmatic preview callers remain a full-chain test harness.
+  // Deployed local workspaces are explicitly configured below as one role.
+  const employeeWorkspace: EmployeeWorkspaceScope = options.employeeWorkspace ?? "ALL";
+  assertEmployeeWorkspaceScope(employeeWorkspace);
   assertActorContext(employeeContext);
   assertActorContext(managerContext);
   assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
@@ -102,6 +114,7 @@ export function createPreviewServer(options: {
         store,
         clock,
         employeeContext,
+        employeeWorkspace,
         managerContext,
         options.clinicalBackend,
         bodyTimeoutMs,
@@ -147,6 +160,7 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   });
   const server = createPreviewServer({
     startupConfig,
+    employeeWorkspace: configuredEmployeeWorkspace(env),
     readiness: new StartupReadiness(startupConfig, readinessProbes),
     clinicalBackend: new PostgresClinicalPreviewBackend(pool, {
       extractionGoldenPath: extractionPath,
@@ -157,12 +171,21 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
   return server;
 }
 
+function configuredEmployeeWorkspace(env: NodeJS.ProcessEnv): EmployeeWorkspace {
+  const value = env.CLINIC_OS_PREVIEW_WORKSPACE ?? "RECEPTION";
+  if (!(["RECEPTION", "DOCTOR", "EXAM", "CASHIER"] as const).includes(value as EmployeeWorkspace)) {
+    throw new DomainError("INVALID_WORKSPACE", "Employee workspace is invalid.");
+  }
+  return value as EmployeeWorkspace;
+}
+
 async function route(
   request: IncomingMessage,
   response: ServerResponse,
   store: PreviewStore,
   clock: () => string,
   employeeContext: ActorContext,
+  employeeWorkspace: EmployeeWorkspaceScope,
   managerContext: ActorContext,
   clinicalBackend?: ClinicalPreviewBackend,
   bodyTimeoutMs = DEFAULT_BODY_TIMEOUT_MS,
@@ -210,6 +233,7 @@ async function route(
       sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
       return;
     }
+    assertWorkspaceRequest(request, employeeWorkspace, "EXAM");
     await handleExamReportExtraction(
       request,
       response,
@@ -225,6 +249,7 @@ async function route(
       sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
       return;
     }
+    assertWorkspaceRequest(request, employeeWorkspace, "EXAM");
     if (url.search) {
       await handleUploadError(response, new DomainError("INVALID_UPLOAD", "Upload request is invalid."));
       return;
@@ -244,6 +269,7 @@ async function route(
       sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
       return;
     }
+    assertWorkspaceRequest(request, employeeWorkspace, "EXAM");
     await handleOpenExpectations(response, url, employeeContext, clinicalBackend, clock());
     return;
   }
@@ -252,13 +278,14 @@ async function route(
       sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
       return;
     }
+    const stage = path === REGISTRATION_TRIGGER_PATH ? "REGISTRATION" : path === PRESCRIPTION_TRIGGER_PATH ? "PRESCRIPTION" : "PAYMENT";
+    assertWorkspaceRequest(request, employeeWorkspace, workspaceForStage(stage));
     if (url.search) {
       sendJson(response, 400, { error: "INVALID_REGISTRATION_REQUEST", message: "Registration request is invalid." });
       request.resume();
       return;
     }
-    await handleStageTrigger(request, response, employeeContext, clinicalBackend, clock, bodyTimeoutMs, operationTimeoutMs,
-      path === REGISTRATION_TRIGGER_PATH ? "REGISTRATION" : path === PRESCRIPTION_TRIGGER_PATH ? "PRESCRIPTION" : "PAYMENT");
+    await handleStageTrigger(request, response, employeeContext, clinicalBackend, clock, bodyTimeoutMs, operationTimeoutMs, stage);
     return;
   }
 
@@ -278,7 +305,7 @@ async function route(
     return;
   }
   if (method === "GET" && path === "/api/employee/bootstrap") {
-    sendJson(response, 200, store.bootstrap(employeeContext));
+    sendJson(response, 200, { ...store.bootstrap(employeeContext), workspace: employeeWorkspace === "ALL" ? "RECEPTION" : employeeWorkspace });
     return;
   }
   if (method === "PUT" && path === "/api/employee/status") {
@@ -403,6 +430,33 @@ async function route(
     return;
   }
   sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
+}
+
+function assertEmployeeWorkspaceScope(value: unknown): asserts value is EmployeeWorkspaceScope {
+  if (!(["RECEPTION", "DOCTOR", "EXAM", "CASHIER", "ALL"] as const).includes(value as EmployeeWorkspaceScope)) {
+    throw new DomainError("INVALID_WORKSPACE", "Employee workspace is invalid.");
+  }
+}
+
+function workspaceForStage(stage: "REGISTRATION" | "PRESCRIPTION" | "PAYMENT"): EmployeeWorkspace {
+  return stage === "REGISTRATION" ? "RECEPTION" : stage === "PRESCRIPTION" ? "DOCTOR" : "CASHIER";
+}
+
+function assertWorkspaceRequest(
+  request: IncomingMessage,
+  actual: EmployeeWorkspaceScope,
+  required: EmployeeWorkspace,
+): void {
+  // A browser may choose how it renders its current task, but never supplies
+  // authority. Reject attempted forwarding explicitly instead of silently
+  // accepting a role-looking header.
+  if (request.headers["x-workspace"] !== undefined || request.headers["x-staff-role"] !== undefined) {
+    throw new DomainError("FORBIDDEN", "Workspace authority is server-controlled.");
+  }
+  if (actual === "ALL") return;
+  if (actual !== required) {
+    throw new DomainError("FORBIDDEN", "This workspace cannot invoke that operation.");
+  }
 }
 
 async function handleOpenExpectations(

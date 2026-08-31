@@ -557,11 +557,11 @@ test("browser retains pending keys until success, clears them on edit, and gates
   assert.match(source, /pendingDecisionKeys\.get\(resourceId\) \|\| crypto\.randomUUID\(\)/);
   assert.match(source, /form\.addEventListener\("input", clear\)/);
   assert.match(source, /item\.verificationStatus === "VERIFIED" \? \["CLOSE_STANDARD", "VOID"\] : \["VOID"\]/);
-  assert.match(source, /<option value="PRESCRIPTION"/);
-  assert.match(source, /<option value="PAYMENT"/);
+  assert.match(source, /kindForWorkspace\(employeeWorkspace\)/);
+  assert.doesNotMatch(source, /<select name="kind">/);
   assert.match(source, /kind === "PAYMENT" \? "\/api\/employee\/payment-trigger"/);
   assert.match(source, /validateStageProjection\(result\)/);
-  assert.match(source, /composerKind = kind === "PRESCRIPTION" \? "EXAM_REPORT" : kind === "PAYMENT" \? "REGISTRATION" : "PRESCRIPTION"/);
+  assert.match(source, /employeeWorkspace = validateWorkspace\(bootstrap\.workspace\)/);
   assert.match(source, /prescriptionStep/);
   assert.match(source, /prescriptionRecorded/);
   assert.match(source, /if \(report && postgresClinical\) void loadOpenExpectations\(form\)/);
