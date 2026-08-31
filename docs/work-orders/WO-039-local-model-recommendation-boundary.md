@@ -1,6 +1,6 @@
 # WO-039 — Local Model Recommendation Boundary
 
-**Status:** Architecture frozen / Builder active  
+**Status:** Accepted locally — 2026-08-31
 **Depends on:** WO-035; WO-036; WO-038
 
 ## Goal
@@ -28,3 +28,11 @@ Prove schema and provider identity checks, no sensitive input/receipt, local
 only/disabled failure behavior, output bounds, no write capability and no
 manager-decision path. Run focused and full tests locally; no push, merge or
 PR.
+
+## Acceptance record
+
+- Recommendation boundary tests passed 3/3; combined WO-039/040 independent
+  focused tests passed 5/5.
+- Independent full regression passed 382/382.
+- The trusted service boundary is complete. A real distilled-model provider
+  and manager-page presentation remain future product work.

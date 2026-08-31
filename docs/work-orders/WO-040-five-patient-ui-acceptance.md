@@ -42,3 +42,5 @@ run focused/full tests locally. No push, merge or PR.
 - Focused acceptance: 2/2; related closure/workspace/dashboard tests: 13/13.
 - Full regression: 382/382; persisted closure demo passed.
 - Command-line output contains only bounded case/status vocabulary.
+- Independent focused verification passed 5/5 together with WO-039, and the
+  independent full regression passed 382/382.

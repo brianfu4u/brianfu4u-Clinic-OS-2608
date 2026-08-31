@@ -2,7 +2,7 @@
 
 **Repository:** `https://github.com/brianfu4u/brianfu4u-Clinic-OS-2608`  
 **Primary branch:** `main`  
-**Updated:** 2026-08-31 — accepted through WO-032  
+**Updated:** 2026-08-31 — accepted through WO-040
 **Product authority:** `docs/CONSTITUTION.md`
 
 ## Product boundary
@@ -29,7 +29,7 @@ The current delivery target is On-Prem on an Apple Silicon Mac with PostgreSQL
 declarations are fail-closed placeholders; Tencent Cloud, Cloud Run, Firestore
 and production cloud adapters are not implemented.
 
-## Implemented foundation
+## Implemented foundation and prototype flow
 
 Work orders WO-001 through WO-031 establish:
 
@@ -46,51 +46,36 @@ Work orders WO-001 through WO-031 establish:
 - persisted registration, extraction and manager-closure acceptance demo;
 - a first operational employee workspace and manager dashboard.
 
-WO-032 is accepted and adds the staged prescription slice:
+WO-032 through WO-040 complete the local prototype path:
 
 ```text
-REGISTRATION -> PRESCRIPTION -> EXAM_REPORT
+REGISTRATION -> PRESCRIPTION -> EXAM_REPORT -> PAYMENT -> manager close
 ```
 
-Read `docs/work-orders/WO-032-persisted-prescription-stage.md` before changing
-that flow.
+This includes persisted payment, four-document deterministic alignment,
+manager attention reads, server-scoped reception/doctor/exam/cashier
+workspaces, a manager operations dashboard, a local-only read-only model
+recommendation boundary, and five synthetic end-to-end UI/API acceptance
+cases. Independent full regression is 382/382.
 
 ## Not implemented
 
-The following are product work, not accepted capabilities:
+The following remain product or production work:
 
-1. `EXAM_REPORT -> PAYMENT` and persisted payment completion.
-2. Frozen structured schemas for registration, prescription, exam and payment
-   documents, including patient/time/department/document/amount alignment.
-3. Cross-document conflict rules such as order inversion, duplicate documents,
-   left/right-eye conflict and near-identity review.
-4. A real local distilled/LLM provider for gap explanation and next-step
-   recommendation. Tesseract is OCR, not this model.
-5. Final reception, doctor, exam and cashier staff surfaces.
-6. Final manager operations dashboard, patient timeline and attention queue.
-7. Five-patient demo coverage for normal, missing, late, reversed and conflicting
-   flows.
-8. Production authentication, real-clinic identity integration, Chinese/Japanese
-   OCR accuracy validation, monitoring, installer and upgrade/rollback packaging.
-9. WO-018 external PostgreSQL application-role RLS, concurrency and destructive
+1. A real local distilled/LLM provider and its manager-page presentation. The
+   accepted WO-039 capability is the trusted local-only recommendation boundary.
+2. Production authentication and real-clinic identity integration.
+3. Chinese/Japanese clinical OCR and extraction accuracy validation.
+4. Monitoring, installer, backup automation and upgrade/rollback packaging.
+5. WO-018 external PostgreSQL application-role RLS, concurrency and destructive
    backup/restore acceptance. Local connectivity is not a substitute.
-10. Production cloud providers or cloud deployment.
+6. Production Tencent/cloud database, object storage and inference adapters.
 
-## Recommended next work orders
+## Next milestone
 
-```text
-WO-033 EXAM_REPORT -> PAYMENT Expectation
-WO-034 persisted PAYMENT completion
-WO-035 structured document schemas and deterministic alignment
-WO-036 manager attention and gap read model
-WO-037 reception/doctor/exam/cashier workspaces
-WO-038 manager operations dashboard
-WO-039 local model recommendation boundary
-WO-040 five-patient end-to-end UI acceptance
-```
-
-Freeze one work order at a time. Do not implement a later item by weakening an
-earlier trust boundary.
+The WO-033 through WO-040 prototype milestone is complete. Select the next
+production milestone before freezing WO-041; do not weaken an accepted trust
+boundary to speed deployment or model integration.
 
 ## Local development
 
@@ -98,6 +83,7 @@ earlier trust boundary.
 npm ci
 npm test
 npm run demo:closure
+npm run accept:five-patient
 ```
 
 Apple Silicon local profile:
