@@ -14,6 +14,26 @@ readonly OBJECT_ROOT="$HOME/clinic-os-data/objects"
   exit 1
 }
 
+# Homebrew's default group-writable installation layout is convenient for
+# package management, but the strict OCR trust gate deliberately rejects it.
+# These are the exact pinned package paths used by this local profile. The
+# current user retains write access, while other local users cannot replace an
+# OCR asset between integrity checks.
+for path in \
+  /opt/homebrew \
+  /opt/homebrew/Cellar \
+  /opt/homebrew/Cellar/tesseract \
+  "$TESSERACT_ROOT" \
+  "$TESSERACT_ROOT/bin" \
+  "$TESSERACT_ROOT/share" \
+  "$TESSERACT_ROOT/share/tessdata" \
+  "$TESSERACT_ROOT/share/tessdata/configs" \
+  "$TESSERACT_ROOT/bin/tesseract" \
+  "$TESSERACT_ROOT/share/tessdata/eng.traineddata" \
+  "$TESSERACT_ROOT/share/tessdata/configs/tsv"; do
+  chmod go-w "$path"
+done
+
 mkdir -p "$OBJECT_ROOT"
 chmod 700 "$OBJECT_ROOT"
 
