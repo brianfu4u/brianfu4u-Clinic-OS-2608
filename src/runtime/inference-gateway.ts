@@ -117,6 +117,10 @@ export class InferenceGateway {
     return structuredClone(this.#receipts.filter(({ clinicId }) => clinicId === context.clinicId));
   }
 
+  get providerKind(): InferenceProvider["kind"] {
+    return this.#expectedProviderKind;
+  }
+
   #assertProviderIdentity(): void {
     if (
       this.#provider.kind !== this.#expectedProviderKind ||
