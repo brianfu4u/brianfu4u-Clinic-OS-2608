@@ -5,7 +5,7 @@ const strings = {
     conversation: "会話", work: "業務を記録", send: "記録する", topicTitle: "トピック名",
     message: "メッセージ", kind: "種類", anchor: "合成ID（DEMO-）", family: "ワークフロー",
     occurredAt: "発生日時", synthetic: "認証なしのローカル非本番画面です。実データを入力しないでください。",
-    all: "すべて", review: "要確認", open: "進行中", complete: "完了", refresh: "更新",
+    all: "すべて", review: "要確認", open: "進行中", complete: "完了", refresh: "更新", alignment: "文書照合", attentionGaps: "要確認の照合",
     noItems: "表示するワークフローはありません。", needsReview: "要確認", quiet: "確認不要",
     action: "店長アクション", reason: "理由コード", note: "任意メモ", decide: "決定を記録", latest: "最新決定",
     expectation: "予期", verification: "S2検証",
@@ -26,7 +26,7 @@ const strings = {
     conversation: "对话", work: "记录业务", send: "提交记录", topicTitle: "主题名称",
     message: "消息", kind: "类型", anchor: "合成编号（DEMO-）", family: "工作流",
     occurredAt: "发生时间", synthetic: "这是未经认证的本地非生产预览。请勿输入真实数据。",
-    all: "全部", review: "需复核", open: "进行中", complete: "完成", refresh: "刷新",
+    all: "全部", review: "需复核", open: "进行中", complete: "完成", refresh: "刷新", alignment: "文件对齐", attentionGaps: "需关注的对齐项",
     noItems: "暂无工作流。", needsReview: "需要复核", quiet: "无需复核",
     action: "店长操作", reason: "原因代码", note: "可选备注", decide: "记录决定", latest: "最近决定",
     expectation: "预期状态", verification: "S2验证",
@@ -47,7 +47,7 @@ const strings = {
     conversation: "Conversation", work: "Record work", send: "Save record", topicTitle: "Topic title",
     message: "Message", kind: "Kind", anchor: "Synthetic ID (DEMO-)", family: "Workflow",
     occurredAt: "Occurred at", synthetic: "Unauthenticated local non-production preview. Do not enter real data.",
-    all: "All", review: "Needs review", open: "Open", complete: "Complete", refresh: "Refresh",
+    all: "All", review: "Needs review", open: "Open", complete: "Complete", refresh: "Refresh", alignment: "Document alignment", attentionGaps: "Alignment attention",
     noItems: "No workflows to display.", needsReview: "Needs review", quiet: "No review needed",
     action: "Manager action", reason: "Reason code", note: "Optional note", decide: "Record decision", latest: "Latest decision",
     expectation: "Expectation", verification: "S2 verification",
@@ -68,6 +68,7 @@ let language = localStorage.getItem("clinic-os-language") || "ja";
 let bootstrap = null;
 let activeTopicId = null;
 let managerItems = [];
+let managerAttentionItems = [];
 let managerFilter = "all";
 let openExpectations = [];
 let expectationLoadEpoch = 0;
@@ -426,22 +427,40 @@ function isBoundedId(value) {
 }
 
 async function loadManager() {
-  managerItems = await api("/api/manager/closures");
+  const [closures, attention] = await Promise.all([
+    api("/api/manager/closures"),
+    postgresClinical ? api("/api/manager/attention-gaps") : Promise.resolve([]),
+  ]);
+  managerItems = closures;
+  managerAttentionItems = validateManagerAttentionItems(attention);
   renderManager();
 }
 
+function validateManagerAttentionItems(value) {
+  if (!Array.isArray(value)) throw new Error(t("networkError"));
+  return value.map((item) => {
+    if (!isPlainObject(item) || !exactKeys(item, ["workflowId", "workflowFamily", "workflowStatus", "stage", "alignmentStatus", "reasonCodes"]) ||
+        !isBoundedId(item.workflowId) || !isBoundedId(item.workflowFamily) || !["OPEN", "CLOSED", "VOIDED"].includes(item.workflowStatus) ||
+        item.stage !== "STRUCTURED_ALIGNMENT" || !["MISSING", "CONFLICT"].includes(item.alignmentStatus) || !Array.isArray(item.reasonCodes) ||
+        item.reasonCodes.length > 16 || item.reasonCodes.some((reason) => !isBoundedId(reason))) throw new Error(t("networkError"));
+    return { workflowId: item.workflowId, workflowFamily: item.workflowFamily, workflowStatus: item.workflowStatus,
+      stage: item.stage, alignmentStatus: item.alignmentStatus, reasonCodes: [...item.reasonCodes] };
+  });
+}
+
 function renderManager() {
+  const attentionOnly = managerFilter === "attention";
   const visible = managerItems.filter((item) => managerFilter === "all" ||
     (managerFilter === "review" && item.needsReview) ||
     (managerFilter === "open" && item.expectationState === "OPEN") ||
     (managerFilter === "complete" && (item.workflowStatus !== "OPEN" || item.expectationState === "MET")));
   const verified = managerItems.filter((item) => item.verificationStatus === "VERIFIED").length;
-  const attention = managerItems.filter((item) => item.needsReview).length;
+  const attention = managerAttentionItems.length;
   app.innerHTML = `<main class="main workspace"><div class="topbar"><div><p class="eyebrow">${t("product")}</p><h1>${t("manager")}</h1></div><div class="top-actions"><a href="/employee">${t("employee")}</a>${languageButtons()}</div></div>
     <p class="notice">${previewNotice()}</p><section class="workspace-intro"><h2>${t("managerIntro")}</h2><div class="metric-grid"><p><strong>${managerItems.length}</strong><span>${t("total")}</span></p><p><strong>${verified}</strong><span>${t("verified")}</span></p><p><strong>${attention}</strong><span>${t("attention")}</span></p></div></section><div class="filters">
-      ${[["all", "all"], ["review", "review"], ["open", "open"], ["complete", "complete"]].map(([value, key]) => `<button type="button" data-filter="${value}" aria-pressed="${managerFilter === value}">${t(key)}</button>`).join("")}
+      ${[["all", "all"], ["attention", "attention"], ["review", "review"], ["open", "open"], ["complete", "complete"]].map(([value, key]) => `<button type="button" data-filter="${value}" aria-pressed="${managerFilter === value}">${t(key)}</button>`).join("")}
       <button type="button" id="refresh">${t("refresh")}</button></div>
-    <section class="cards">${visible.map((item) => `<article class="card ${item.needsReview ? "review" : ""}">
+    <section class="cards">${attentionOnly ? managerAttentionItems.map(attentionCard).join("") : visible.map((item) => `<article class="card ${item.needsReview ? "review" : ""}">
       <h2>${escapeHtml(item.identityAnchor)} · ${escapeHtml(item.workflowFamily)}</h2>
       <p>${t("expectation")}: <strong>${escapeHtml(item.expectationState)}</strong><br>${t("verification")}: <strong>${escapeHtml(item.verificationStatus)}</strong> ${item.verificationReasonCodes.map(escapeHtml).join(", ")}</p>
       <p>${item.needsReview ? t("needsReview") : t("quiet")}</p>
@@ -481,6 +500,13 @@ function renderManager() {
     form.addEventListener("change", clear);
   });
   bindLanguage();
+}
+
+function attentionCard(item) {
+  return `<article class="card review"><h2>${escapeHtml(item.workflowFamily)}</h2>
+    <p>${t("alignment")}: <strong>${escapeHtml(item.alignmentStatus)}</strong></p>
+    <p>${t("attentionGaps")}: ${item.reasonCodes.map((code) => escapeHtml(code.replaceAll("_", " "))).join(" · ") || "—"}</p>
+  </article>`;
 }
 
 function decisionForm(item) {
