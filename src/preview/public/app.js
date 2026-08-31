@@ -1,8 +1,8 @@
 const strings = {
   ja: {
-    product: "Clinic OS · 合成データプレビュー", employee: "スタッフ", manager: "店長画面",
+    product: "Clinic OS · ローカル運用プレビュー", employee: "スタッフ業務", manager: "店長ダッシュボード",
     newTopic: "新しいトピック", state: "勤務状態", onDuty: "勤務中", onBreak: "休憩中", offDuty: "退勤",
-    conversation: "会話", work: "業務更新として記録", send: "送信", topicTitle: "トピック名",
+    conversation: "会話", work: "業務を記録", send: "記録する", topicTitle: "トピック名",
     message: "メッセージ", kind: "種類", anchor: "合成ID（DEMO-）", family: "ワークフロー",
     occurredAt: "発生日時", synthetic: "認証なしのローカル非本番画面です。実データを入力しないでください。",
     all: "すべて", review: "要確認", open: "進行中", complete: "完了", refresh: "更新",
@@ -17,12 +17,13 @@ const strings = {
     chooseEvidence: "PNG、JPEG、またはPDFファイルを選択してください。",
     registrationRecorded: "受付登録を記録しました。次に未完了の検査レポートを選択してください。",
     evidenceCompleted: "証拠を処理しました", extractionReview: "証拠の抽出に確認が必要です。", compositionReview: "ワークフロー照合に確認が必要です。",
+    employeeIntro: "受付登録と検査レポートを、同じ患者フローへ記録します。", registrationStep: "1. 受付登録", reportStep: "2. 検査レポート", managerIntro: "未完了の患者フローと、店長確認が必要な項目を確認します。", total: "全フロー", verified: "検証済み", attention: "要確認",
     networkError: "プレビューサービスに接続できませんでした。もう一度お試しください。",
   },
   zh: {
-    product: "Clinic OS · 合成数据预览", employee: "员工端", manager: "店长端",
+    product: "Clinic OS · 本地运营预览", employee: "员工工作台", manager: "店长运营看板",
     newTopic: "新主题", state: "工作状态", onDuty: "在岗", onBreak: "休息", offDuty: "下班",
-    conversation: "对话", work: "记录为工作更新", send: "发送", topicTitle: "主题名称",
+    conversation: "对话", work: "记录业务", send: "提交记录", topicTitle: "主题名称",
     message: "消息", kind: "类型", anchor: "合成编号（DEMO-）", family: "工作流",
     occurredAt: "发生时间", synthetic: "这是未经认证的本地非生产预览。请勿输入真实数据。",
     all: "全部", review: "需复核", open: "进行中", complete: "完成", refresh: "刷新",
@@ -37,12 +38,13 @@ const strings = {
     chooseEvidence: "请选择PNG、JPEG或PDF文件。",
     registrationRecorded: "登记已记录。请接着选择待处理检查报告。",
     evidenceCompleted: "证据已处理", extractionReview: "证据抽取需要复核。", compositionReview: "工作流匹配需要复核。",
+    employeeIntro: "将登记和检查报告记录到同一位患者的流程中。", registrationStep: "第一步：前台登记", reportStep: "第二步：上传检查报告", managerIntro: "查看未闭环的患者流程，以及需要店长确认的项目。", total: "全部流程", verified: "已验证", attention: "需关注",
     networkError: "无法连接预览服务，请重试。",
   },
   en: {
-    product: "Clinic OS · Synthetic preview", employee: "Employee", manager: "Manager",
+    product: "Clinic OS · Local operations preview", employee: "Staff workspace", manager: "Manager dashboard",
     newTopic: "New topic", state: "Work status", onDuty: "On duty", onBreak: "On break", offDuty: "Off duty",
-    conversation: "Conversation", work: "Record as work update", send: "Send", topicTitle: "Topic title",
+    conversation: "Conversation", work: "Record work", send: "Save record", topicTitle: "Topic title",
     message: "Message", kind: "Kind", anchor: "Synthetic ID (DEMO-)", family: "Workflow",
     occurredAt: "Occurred at", synthetic: "Unauthenticated local non-production preview. Do not enter real data.",
     all: "All", review: "Needs review", open: "Open", complete: "Complete", refresh: "Refresh",
@@ -57,6 +59,7 @@ const strings = {
     chooseEvidence: "Choose a PNG, JPEG, or PDF evidence file.",
     registrationRecorded: "Registration recorded. Select an open exam report next.",
     evidenceCompleted: "Evidence processed", extractionReview: "Evidence extraction needs review.", compositionReview: "Workflow matching needs review.",
+    employeeIntro: "Record registration and an exam report into the same patient flow.", registrationStep: "1. Reception registration", reportStep: "2. Upload exam report", managerIntro: "Review incomplete patient flows and items requiring a manager decision.", total: "All flows", verified: "Verified", attention: "Needs attention",
     networkError: "The preview service could not be reached. Please try again.",
   },
 };
@@ -72,7 +75,7 @@ const pendingDecisionKeys = new Map();
 let postgresClinical = false;
 let evidenceStatus = null;
 let registrationStatus = null;
-let composerMode = "conversation";
+let composerMode = "work";
 let composerKind = "REGISTRATION";
 const app = document.querySelector("#app");
 const t = (key) => strings[language][key];
@@ -146,38 +149,13 @@ async function loadEmployee() {
 }
 
 function renderEmployee() {
-  const topic = bootstrap.topics.find(({ id }) => id === activeTopicId);
-  const messages = bootstrap.messages.filter(({ topicId }) => topicId === activeTopicId);
-  app.innerHTML = `<div class="shell">
-    <aside class="rail"><h1>${t("product")}</h1><p><a href="/manager">${t("manager")}</a></p>
-      <label for="employee-state">${t("state")}</label>
-      <select id="employee-state"><option value="ON_DUTY">${t("onDuty")}</option><option value="ON_BREAK">${t("onBreak")}</option><option value="OFF_DUTY">${t("offDuty")}</option></select>
-      <button type="button" id="new-topic">＋ ${t("newTopic")}</button>
-      <ul class="topics">${topicList()}</ul>
-    </aside>
-    <main class="main"><div class="topbar"><h2>${escapeHtml(topic?.title || t("employee"))}</h2>${languageButtons()}</div>
-      <p class="notice">${previewNotice()}</p>
-      ${registrationStatus ? `<p class="evidence-status success" role="status">${t("registrationRecorded")}</p>` : ""}
-      ${evidenceStatus ? evidenceStatusMarkup() : ""}
-      <section class="thread" aria-label="Message thread">${messages.map((message) => `<div class="message ${message.role === "EMPLOYEE" ? "employee" : ""}">${escapeHtml(message.text)}</div>`).join("") || `<p class="empty">${t("newTopic")}</p>`}</section>
-      ${topic ? composer() : ""}
-    </main></div>`;
-  document.querySelector("#employee-state").value = bootstrap.status;
-  document.querySelector("#employee-state").addEventListener("change", async (event) => {
-    await api("/api/employee/status", { method: "PUT", body: JSON.stringify({ status: event.target.value }) });
-    await loadEmployee();
-  });
-  document.querySelector("#new-topic").addEventListener("click", async () => {
-    const title = prompt(t("topicTitle"));
-    if (!title) return;
-    const topic = await api("/api/employee/topics", { method: "POST", body: JSON.stringify({ title }) });
-    activeTopicId = topic.id;
-    await loadEmployee();
-  });
-  document.querySelectorAll("[data-topic]").forEach((button) => button.addEventListener("click", () => {
-    activeTopicId = button.dataset.topic;
-    renderEmployee();
-  }));
+  app.innerHTML = `<main class="main workspace"><div class="topbar"><div><p class="eyebrow">${t("product")}</p><h1>${t("employee")}</h1></div><div class="top-actions"><a href="/manager">${t("manager")}</a>${languageButtons()}</div></div>
+    <p class="notice">${previewNotice()}</p>
+    ${registrationStatus ? `<p class="evidence-status success" role="status">${t("registrationRecorded")}</p>` : ""}
+    ${evidenceStatus ? evidenceStatusMarkup() : ""}
+    <section class="workspace-intro"><h2>${t("employeeIntro")}</h2><p>${t("registrationStep")} → ${t("reportStep")} → S2</p></section>
+    ${composer()}
+  </main>`;
   bindLanguage();
   bindComposer();
 }
@@ -195,10 +173,8 @@ function topicList() {
 
 function composer() {
   const local = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-  return `<form class="composer" id="composer"><div class="mode">
-    <label><input type="radio" name="mode" value="conversation" ${composerMode === "conversation" ? "checked" : ""}> ${t("conversation")}</label>
-    <label><input type="radio" name="mode" value="work" ${composerMode === "work" ? "checked" : ""}> ${t("work")}</label></div>
-    <div class="work-fields" ${composerMode === "work" ? "" : "hidden"}>
+  return `<form class="composer operational-composer" id="composer"><input type="hidden" name="mode" value="work">
+    <div class="work-fields">
       <label>${t("kind")}<select name="kind"><option value="REGISTRATION" ${composerKind === "REGISTRATION" ? "selected" : ""}>REGISTRATION</option><option value="EXAM_REPORT" ${composerKind === "EXAM_REPORT" ? "selected" : ""}>EXAM_REPORT</option></select></label>
       <label>${t("anchor")}<input name="identityAnchor" value="DEMO-001" required></label>
       <label>${t("family")}<input name="workflowFamily" value="EYE_EXAM" readonly></label>
@@ -211,7 +187,7 @@ function composer() {
         <p class="muted" data-evidence-help></p>
       </div>
     </div>
-    <div data-message-field ${postgresClinical && composerMode === "work" ? "hidden" : ""}><label for="message-text">${t("message")}</label><textarea id="message-text" name="text" ${postgresClinical && composerMode === "work" ? "disabled" : "required"}></textarea></div>
+    <input name="text" value="Local operational record" hidden>
     <button class="primary" type="submit">${t("send")}</button><p id="form-error" role="alert"></p>
   </form>`;
 }
@@ -219,11 +195,6 @@ function composer() {
 function bindComposer() {
   const form = document.querySelector("#composer");
   if (!form) return;
-  form.querySelectorAll('[name="mode"]').forEach((radio) => radio.addEventListener("change", () => {
-    composerMode = form.elements.mode.value;
-    form.querySelector(".work-fields").hidden = form.elements.mode.value !== "work";
-    updateEvidenceControl(form);
-  }));
   form.elements.kind.addEventListener("change", () => { composerKind = form.elements.kind.value; registrationStatus = null; updateEvidenceControl(form); });
   form.elements.identityAnchor.addEventListener("change", () => { registrationStatus = null; updateEvidenceControl(form); });
   form.addEventListener("input", () => { delete form.dataset.idempotencyKey; });
@@ -251,8 +222,6 @@ function bindComposer() {
           if (result.status === "COMPLETED") await loadOpenExpectations(form);
         }
         delete form.dataset.idempotencyKey;
-      } else {
-        await api("/api/employee/messages", { method: "POST", body: JSON.stringify({ topicId: activeTopicId, text: data.get("text") }) });
       }
       await loadEmployee();
     } catch (error) {
@@ -266,12 +235,7 @@ function updateEvidenceControl(form) {
   const control = form.querySelector("[data-evidence-control]");
   const file = form.elements.evidenceFile;
   const help = form.querySelector("[data-evidence-help]");
-  const report = form.elements.kind.value === "EXAM_REPORT" && form.elements.mode.value === "work";
-  const message = form.querySelector("[data-message-field]");
-  const text = form.elements.text;
-  message.hidden = postgresClinical && form.elements.mode.value === "work";
-  text.disabled = postgresClinical && form.elements.mode.value === "work";
-  text.required = !(postgresClinical && form.elements.mode.value === "work");
+  const report = form.elements.kind.value === "EXAM_REPORT";
   control.hidden = !report;
   file.disabled = !report || !postgresClinical;
   const select = form.elements.expectationId;
@@ -303,7 +267,7 @@ async function loadOpenExpectations(form) {
   select.disabled = true;
   try {
     const page = validateOpenExpectationPage(await api("/api/employee/open-expectations?limit=25"));
-    if (epoch !== expectationLoadEpoch || form.elements.kind.value !== "EXAM_REPORT" || form.elements.mode.value !== "work") return;
+    if (epoch !== expectationLoadEpoch || form.elements.kind.value !== "EXAM_REPORT") return;
     openExpectations = page.items;
     select.innerHTML = `<option value="">${escapeHtml(page.items.length ? t("expectationSelect") : t("expectationEmpty"))}</option>` +
       page.items.map((item) => `<option value="${escapeHtml(item.expectationId)}">${escapeHtml(`${item.workflowFamily} · ${item.consequenceKind} · ${new Date(item.dueAt).toLocaleString(language)}`)}</option>`).join("");
@@ -452,15 +416,17 @@ function renderManager() {
     (managerFilter === "review" && item.needsReview) ||
     (managerFilter === "open" && item.expectationState === "OPEN") ||
     (managerFilter === "complete" && (item.workflowStatus !== "OPEN" || item.expectationState === "MET")));
-  app.innerHTML = `<main class="main"><div class="topbar"><div><h1>${t("manager")}</h1><a href="/employee">${t("employee")}</a></div>${languageButtons()}</div>
-    <p class="notice">${previewNotice()}</p><div class="filters">
+  const verified = managerItems.filter((item) => item.verificationStatus === "VERIFIED").length;
+  const attention = managerItems.filter((item) => item.needsReview).length;
+  app.innerHTML = `<main class="main workspace"><div class="topbar"><div><p class="eyebrow">${t("product")}</p><h1>${t("manager")}</h1></div><div class="top-actions"><a href="/employee">${t("employee")}</a>${languageButtons()}</div></div>
+    <p class="notice">${previewNotice()}</p><section class="workspace-intro"><h2>${t("managerIntro")}</h2><div class="metric-grid"><p><strong>${managerItems.length}</strong><span>${t("total")}</span></p><p><strong>${verified}</strong><span>${t("verified")}</span></p><p><strong>${attention}</strong><span>${t("attention")}</span></p></div></section><div class="filters">
       ${[["all", "all"], ["review", "review"], ["open", "open"], ["complete", "complete"]].map(([value, key]) => `<button type="button" data-filter="${value}" aria-pressed="${managerFilter === value}">${t(key)}</button>`).join("")}
       <button type="button" id="refresh">${t("refresh")}</button></div>
     <section class="cards">${visible.map((item) => `<article class="card ${item.needsReview ? "review" : ""}">
       <h2>${escapeHtml(item.identityAnchor)} · ${escapeHtml(item.workflowFamily)}</h2>
       <p>${t("expectation")}: <strong>${escapeHtml(item.expectationState)}</strong><br>${t("verification")}: <strong>${escapeHtml(item.verificationStatus)}</strong> ${item.verificationReasonCodes.map(escapeHtml).join(", ")}</p>
       <p>${item.needsReview ? t("needsReview") : t("quiet")}</p>
-      <p class="muted">Workflow: ${escapeHtml(item.workflowId)}<br>Evidence: ${item.evidenceArtifactIds.map(escapeHtml).join(", ") || "—"}<br>Reasons: ${item.reasonCodes.map(escapeHtml).join(", ") || "—"}</p>
+      <p class="muted">${t("expectation")}: ${escapeHtml(item.reasonCodes.map((code) => code.replaceAll("_", " ")).join(" · ") || "—")}</p>
       ${item.latestDecision ? `<p>${t("latest")}: ${escapeHtml(item.latestDecision.action)}${item.latestDecision.reasonCode ? ` · ${escapeHtml(item.latestDecision.reasonCode)}` : ""}</p>` : ""}
       ${decisionForm(item)}
     </article>`).join("") || `<p class="empty">${t("noItems")}</p>`}</section></main>`;

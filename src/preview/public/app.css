@@ -26,6 +26,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .topic-date { margin-top: .9rem; color: #c7d7db; font-size: .8rem; }
 .main { max-width: 66rem; width: 100%; margin: 0 auto; padding: 1.5rem; }
 .topbar { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+.topbar h1 { margin: 0; }
+.top-actions { display: flex; align-items: center; gap: 1rem; }
+.top-actions a { color: #0d5b55; font-weight: 700; }
+.eyebrow { color: #52636a; font-size: .8rem; font-weight: 700; letter-spacing: .08em; margin: 0 0 .25rem; text-transform: uppercase; }
+.workspace { max-width: 76rem; }
+.workspace-intro { margin: 1rem 0; padding: 1.25rem; border-radius: .8rem; background: #e0f3ed; }
+.workspace-intro h2 { margin: 0 0 .35rem; }
+.workspace-intro p { margin: 0; color: #315e58; }
+.operational-composer { background: #fff; border: 1px solid #d5dfe2; border-radius: .8rem; padding: 1.25rem; }
+.metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; }
+.metric-grid p { display: grid; gap: .15rem; border-radius: .6rem; background: #fff; padding: .7rem; color: #52636a; }
+.metric-grid strong { color: #153a42; font-size: 1.6rem; }
+.metric-grid span { font-size: .85rem; }
 .language { display: flex; gap: .4rem; }
 .language button { padding: .35rem .55rem; }
 .notice { background: #fff4cc; border-radius: .6rem; padding: .7rem; margin: 1rem 0; }
@@ -62,4 +75,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .work-fields { grid-template-columns: 1fr; }
   .decision-form { grid-template-columns: 1fr; }
   .message { max-width: 92%; }
+  .top-actions { align-items: flex-end; flex-direction: column; }
+  .metric-grid { grid-template-columns: 1fr; }
 }

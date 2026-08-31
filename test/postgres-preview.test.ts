@@ -451,5 +451,8 @@ test("browser retains pending keys until success, clears them on edit, and gates
   assert.match(source, /item\.verificationStatus === "VERIFIED" \? \["CLOSE_STANDARD", "VOID"\] : \["VOID"\]/);
   assert.match(source, /postgresClinical \? "\/api\/employee\/registration-trigger" : "\/api\/employee\/work-updates"/);
   assert.match(source, /await loadOpenExpectations\(form\)/);
+  assert.match(source, /employeeIntro/);
+  assert.match(source, /managerIntro/);
+  assert.match(source, /operational-composer/);
   assert.doesNotMatch(source, /localStorage\.(?:setItem|getItem)\([^)]*(?:expectation|registration|identity)/i);
 });
