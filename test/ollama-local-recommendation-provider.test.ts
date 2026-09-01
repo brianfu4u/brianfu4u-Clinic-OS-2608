@@ -68,3 +68,16 @@ test("Ollama provider fails closed on foreign model, redirect, timeout and overs
   })).infer(CONTEXT, REQUEST), unavailable);
   await assert.rejects(make(async () => new Response("x".repeat(64 * 1024 + 1), { headers: { "content-length": String(64 * 1024 + 1) } })).infer(CONTEXT, REQUEST), unavailable);
 });
+
+test("Ollama provider rejects an unserializable request before local transport", async () => {
+  let calls = 0;
+  const cyclic: { self?: unknown } = {};
+  cyclic.self = cyclic;
+  const provider = new OllamaLocalRecommendationProvider({
+    endpoint: "http://localhost:11434", modelId: "approved-model",
+    fetcher: async () => { calls += 1; return Response.json({}); },
+  });
+  await assert.rejects(provider.infer(CONTEXT, { ...REQUEST, input: cyclic }),
+    (error) => error instanceof DomainError && error.code === "LOCAL_RECOMMENDATION_REQUEST_INVALID");
+  assert.equal(calls, 0);
+});

@@ -43,16 +43,21 @@ export class OllamaLocalRecommendationProvider implements InferenceProvider {
   }
 
   async infer(_context: ActorContext, request: InferenceRequest): Promise<InferenceResponse> {
-    const body = JSON.stringify({
-      model: this.modelId,
-      stream: false,
-      format: "json",
-      prompt: JSON.stringify({
-        schemaVersion: request.schemaVersion,
-        capability: request.capability,
-        input: request.input,
-      }),
-    });
+    let body: string;
+    try {
+      body = JSON.stringify({
+        model: this.modelId,
+        stream: false,
+        format: "json",
+        prompt: JSON.stringify({
+          schemaVersion: request.schemaVersion,
+          capability: request.capability,
+          input: request.input,
+        }),
+      });
+    } catch {
+      throw new DomainError("LOCAL_RECOMMENDATION_REQUEST_INVALID", "Local recommendation request is invalid.");
+    }
     if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) {
       throw new DomainError("LOCAL_RECOMMENDATION_REQUEST_TOO_LARGE", "Local recommendation request is too large.");
     }
