@@ -1,6 +1,6 @@
 # WO-041 — Local Ollama Recommendation Provider
 
-**Status:** Architecture frozen / Builder active
+**Status:** Accepted locally — 2026-09-01
 **Depends on:** Constitution §2–§4; WO-039; WO-040
 
 ## Goal
@@ -36,3 +36,11 @@ push only after acceptance.
 
 Ollama is a local runner, not a required app dependency. A future Mac setup
 will install it and choose/pull a small approved model explicitly.
+
+## Acceptance record
+
+- Loopback-only provider tests passed 4/4; combined provider/configuration
+  focused tests passed 14/14.
+- Independent full regression passed 385/385.
+- Tesseract OCR remains separately assembled. No recommendation endpoint,
+  database write or UI presentation was introduced.

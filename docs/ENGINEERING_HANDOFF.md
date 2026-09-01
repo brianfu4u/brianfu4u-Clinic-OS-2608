@@ -2,7 +2,7 @@
 
 **Repository:** `https://github.com/brianfu4u/brianfu4u-Clinic-OS-2608`  
 **Primary branch:** `main`  
-**Updated:** 2026-08-31 — accepted through WO-040
+**Updated:** 2026-09-01 — accepted through WO-041
 **Product authority:** `docs/CONSTITUTION.md`
 
 ## Product boundary
@@ -55,15 +55,17 @@ REGISTRATION -> PRESCRIPTION -> EXAM_REPORT -> PAYMENT -> manager close
 This includes persisted payment, four-document deterministic alignment,
 manager attention reads, server-scoped reception/doctor/exam/cashier
 workspaces, a manager operations dashboard, a local-only read-only model
-recommendation boundary, and five synthetic end-to-end UI/API acceptance
-cases. Independent full regression is 382/382.
+recommendation boundary, an optional loopback-only Ollama provider, and five
+synthetic end-to-end UI/API acceptance cases. Independent full regression is
+385/385.
 
 ## Not implemented
 
 The following remain product or production work:
 
-1. A real local distilled/LLM provider and its manager-page presentation. The
-   accepted WO-039 capability is the trusted local-only recommendation boundary.
+1. Installation and selection of an approved local model on the clinic Mac, and
+   its manager-page presentation. The trusted local-only boundary and Ollama
+   adapter are accepted; neither downloads a model automatically.
 2. Production authentication and real-clinic identity integration.
 3. Chinese/Japanese clinical OCR and extraction accuracy validation.
 4. Monitoring, installer, backup automation and upgrade/rollback packaging.
