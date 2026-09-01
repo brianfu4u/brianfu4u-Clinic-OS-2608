@@ -15,6 +15,8 @@ import { createNodePgPool, type NodePgPool } from "../persistence/node-pg-pool.t
 import { isRepositorySchemaCompatible } from "../persistence/migration-runner.ts";
 import { InferenceGateway } from "./inference-gateway.ts";
 import { TesseractOcrProvider } from "./tesseract-ocr-provider.ts";
+import { OllamaLocalRecommendationProvider, validateOllamaLoopbackEndpoint } from "./ollama-local-recommendation-provider.ts";
+import { LocalManagerRecommendationService } from "../application/local-manager-recommendation.ts";
 import { LocalObjectStore } from "../storage/local-object-store.ts";
 import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
 
@@ -60,6 +62,8 @@ interface PrivateStartupValues {
   privateInferenceEndpoint?: string;
   privateInferenceModelId?: string;
   privateInferenceManifestSha256?: string;
+  localRecommendationEndpoint?: string;
+  localRecommendationModelId?: string;
 }
 
 const privateValues = new WeakMap<object, PrivateStartupValues>();
@@ -70,6 +74,7 @@ const ENV_NAMES = new Set([
   "CLINIC_OS_MANIFEST_VERSION", "CLINIC_OS_OBJECT_STORE_ROOT", "WO021_TESSERACT_PATH",
   "WO021_TESSDATA_DIR", "CLINIC_OS_PRIVATE_INFERENCE_ENDPOINT", "CLINIC_OS_PRIVATE_INFERENCE_MODEL_ID",
   "CLINIC_OS_PRIVATE_INFERENCE_MANIFEST_SHA256", "CLINIC_OS_INFERENCE_CAPABILITIES", "PORT",
+  "CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT", "CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID",
   "PREVIEW_MODE", "PREVIEW_OBJECT_STORE_ROOT", "LOCAL_OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT",
 ]);
 const LEGACY_NAMES = new Set(["PREVIEW_OBJECT_STORE_ROOT", "LOCAL_OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT", "PREVIEW_PORT"]);
@@ -79,6 +84,8 @@ export interface ConfiguredLocalRuntime {
   readonly pool: NodePgPool;
   readonly objects: ObjectStoreGateway;
   readonly inference: InferenceGateway;
+  /** Optional, separately configured, read-only local-model guidance adapter. */
+  readonly localRecommendations: LocalManagerRecommendationService | null;
   readonly readinessProbes: Readonly<{
     database: () => Promise<boolean>;
     objectStore: () => Promise<boolean>;
@@ -166,6 +173,20 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
     env.CLINIC_OS_PRIVATE_INFERENCE_MANIFEST_SHA256,
   ].some((value) => value !== undefined)) throw startupError("PRIVATE_INFERENCE_CONFIGURATION_FORBIDDEN");
 
+  const recommendationValuesPresent = [
+    env.CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT,
+    env.CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID,
+  ].some((value) => value !== undefined);
+  if (recommendationValuesPresent && manifest.inferenceProvider !== "LOCAL_MODEL") {
+    throw startupError("LOCAL_RECOMMENDATION_CONFIGURATION_FORBIDDEN");
+  }
+  const localRecommendationEndpoint = recommendationValuesPresent
+    ? validateLocalRecommendationEndpoint(env.CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT)
+    : undefined;
+  const localRecommendationModelId = recommendationValuesPresent
+    ? boundedToken(env.CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID, "LOCAL_RECOMMENDATION_MODEL_REQUIRED")
+    : undefined;
+
   const port = parsePort(env.PORT);
   const snapshot = makeSnapshot(manifest, capabilities, {
     databaseConfigured: true,
@@ -182,6 +203,8 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
     privateInferenceEndpoint: endpoint,
     privateInferenceModelId: modelId,
     privateInferenceManifestSha256: modelManifestSha256,
+    localRecommendationEndpoint,
+    localRecommendationModelId,
   }));
   return config;
 }
@@ -204,10 +227,17 @@ export function createConfiguredLocalRuntime(config: StartupConfig): ConfiguredL
     executablePath: values.tesseractPath,
     tessdataDir: values.tessdataDir,
   }));
+  const localRecommendations = values.localRecommendationEndpoint && values.localRecommendationModelId
+    ? new LocalManagerRecommendationService(new InferenceGateway(manifest, new OllamaLocalRecommendationProvider({
+        endpoint: values.localRecommendationEndpoint,
+        modelId: values.localRecommendationModelId,
+      })))
+    : null;
   return Object.freeze({
     pool,
     objects,
     inference,
+    localRecommendations,
     readinessProbes: Object.freeze({
       database: async () => {
         const connection = await pool.connect();
@@ -358,6 +388,15 @@ function validatePrivateEndpoint(value: string | undefined): string {
     throw startupError("PRIVATE_INFERENCE_ENDPOINT_INVALID");
   }
   return result;
+}
+
+function validateLocalRecommendationEndpoint(value: string | undefined): string {
+  const endpoint = required(value, "LOCAL_RECOMMENDATION_ENDPOINT_REQUIRED");
+  try {
+    return validateOllamaLoopbackEndpoint(endpoint);
+  } catch {
+    throw startupError("LOCAL_RECOMMENDATION_ENDPOINT_INVALID");
+  }
 }
 
 function exactSha256(value: string | undefined, code: string): string {
