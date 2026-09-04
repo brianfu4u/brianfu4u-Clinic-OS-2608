@@ -54,6 +54,12 @@ After installing PostgreSQL 17, creating `clinic_os_local`, and running `npm run
 bash scripts/start-macos-local.sh
 ```
 
+Open the printed loopback root first for the safe local readiness screen. It
+shows only bounded states for database/schema, OCR assets, optional local model
+and the optional five-case demo workspace, then links to `/employee` and
+`/manager`. It never resets data, runs migrations, downloads a model or exposes
+configuration values.
+
 The local clinical preview starts as the reception workspace. For a separate
 doctor, exam, or cashier session, restart it with a server-controlled workspace
 value (the browser cannot change this):
@@ -62,6 +68,121 @@ value (the browser cannot change this):
 CLINIC_OS_PREVIEW_WORKSPACE=DOCTOR bash scripts/start-macos-local.sh
 # valid values: RECEPTION, DOCTOR, EXAM, CASHIER
 ```
+
+### Optional local-model preflight
+
+With Ollama already installed, running and explicitly configured through
+`CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT` and
+`CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID`, verify its bounded manager-guidance
+contract before opening the preview:
+
+```bash
+npm run preflight:macos-local-model
+```
+
+It prints only `READY` guidance fields or the fixed
+`LOCAL_MODEL_PREFLIGHT_UNAVAILABLE` result. It neither installs nor downloads a
+model, and it does not start the preview or access PostgreSQL, OCR or stored
+evidence.
+
+### Optional external-volume local-model trial
+
+After you have manually installed a chosen model on the approved encrypted
+external volume, make that exact model ID an explicit one-command approval and
+run the bounded trial below. The command checks the mounted volume before it
+contacts the existing loopback runner:
+
+```bash
+CLINIC_OS_EXTERNAL_MODEL_VOLUME_ROOT='/Volumes/ClinicModels' \
+CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT='http://127.0.0.1:11434' \
+CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID='chosen-local-model' \
+LOCAL_MODEL_TRIAL_APPROVED_MODEL_ID='chosen-local-model' \
+npm run trial:macos-external-local-model
+```
+
+It prints only the existing bounded guidance result or
+`LOCAL_MODEL_TRIAL_UNAVAILABLE`. It never installs, pulls or removes a model;
+mounts/formats a disk; changes `OLLAMA_MODELS`; or enables clinical processing.
+
+### Local OCR evaluation
+
+This explicit read-only command evaluates only a checked-in synthetic,
+non-PHI corpus manifest. Create an absolute, mode-`0700` corpus directory
+containing exactly the PNG files named by the selected fixed manifest, then use
+the pinned asset paths from the Mac launcher:
+
+```bash
+WO021_TESSERACT_PATH=/opt/homebrew/Cellar/tesseract/5.5.3/bin/tesseract \
+WO021_TESSDATA_DIR=/opt/homebrew/Cellar/tesseract/5.5.3/share/tessdata \
+npm run evaluate:ocr-local -- /absolute/path/to/non-phi-ocr-fixtures
+```
+
+It emits aggregate counts, CER basis points and fixed reason codes only. Extra,
+missing, changed, symlinked or unsafe corpus files are refused before OCR.
+
+For the separately gated synthetic Chinese or Japanese checks, pass exactly
+`chi_sim` or `jpn` as the final argument and use the corresponding checked-in
+manifest (`models/local-ocr-evaluation-chi-sim-fixtures-v1.manifest.json` or
+`models/local-ocr-evaluation-jpn-fixtures-v1.manifest.json`). An absent or
+unsafe optional language asset is refused before the OCR provider is created.
+These fixtures are a local-engine measurement gate, not a claim of clinical
+language accuracy and do not enable non-English clinical extraction.
+
+### Local OCR language release record
+
+After a `READY` evaluation, save its single JSON line to a mode-`0600` absolute
+file, then have an operator explicitly approve or reject that exact aggregate.
+The command writes only the language, aggregate metrics, decision and timestamp
+to the supplied local mode-`0700` records directory. It never enables clinical
+OCR.
+
+```bash
+node scripts/evaluate-local-ocr.ts /absolute/path/to/non-phi-ocr-fixtures chi_sim > /absolute/path/to/evaluation.json
+npm run record:ocr-language-release -- chi_sim /absolute/path/to/evaluation.json APPROVE_LOCAL_OCR_LANGUAGE_RELEASE /absolute/path/to/local-release-records
+```
+
+To display an approved optional-language release on the local readiness page,
+use the one fixed local records directory below. This is only a visible
+operator readiness indicator: it does not enable non-English clinical OCR.
+
+```bash
+mkdir -p "$HOME/clinic-os-data/ocr-language-releases"
+chmod 700 "$HOME/clinic-os-data/ocr-language-releases"
+npm run record:ocr-language-release -- chi_sim /absolute/path/to/evaluation.json APPROVE_LOCAL_OCR_LANGUAGE_RELEASE "$HOME/clinic-os-data/ocr-language-releases"
+```
+
+### Resettable macOS demonstration workspace
+
+Create one empty, dedicated local PostgreSQL database named `clinic_os_demo`,
+then run this explicit destructive demo-only command. It refuses every other
+host, port, database name, or missing confirmation, runs the checked-in
+migrations, creates five synthetic cases through the normal application seams,
+and starts the existing local preview.
+
+```bash
+createdb clinic_os_demo
+CLINIC_OS_DEMO_DATABASE_URL="postgresql://$USER@localhost:5432/clinic_os_demo" \
+CLINIC_OS_DEMO_RESET=RESET_LOCAL_DEMO \
+npm run demo:macos-workspace
+```
+
+It is not a backup, import, or production deployment command. Its terminal
+summary contains only the prepared case count; use the printed local employee
+and manager URLs to view the synthetic data.
+
+For later repeat demonstrations, after that workspace has already been
+prepared, use the non-destructive launcher below. It refuses anything except
+the exact local demo database and an existing safe demo object directory. It
+does not reset, migrate, seed, download or install anything:
+
+```bash
+CLINIC_OS_DEMO_DATABASE_URL="postgresql://$USER@localhost:5432/clinic_os_demo" \
+npm run demo:macos-prepared
+```
+
+It prints only the two loopback URLs. If it prints a fixed unavailable or
+refused result, run the separate preparation command above rather than trying
+to repair the database through this launcher.
 
 It is a local, non-PHI test profile. Homebrew upgrades are intentionally rejected until their
 asset manifest has been reviewed and released.

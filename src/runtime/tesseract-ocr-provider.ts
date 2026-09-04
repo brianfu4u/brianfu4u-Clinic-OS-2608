@@ -33,6 +33,7 @@ const MAX_OCR_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 500;
 const FINAL_GRACE_MS = 500;
+export type TesseractLanguage = "eng" | "chi_sim+eng" | "jpn+eng";
 
 export interface TesseractModelManifest {
   manifestVersion: string;
@@ -254,6 +255,8 @@ interface TrustedPath {
 interface ProviderConfig {
   executablePath: string;
   tessdataDir: string;
+  /** Evaluation-only callers may select a separately gated installed language. */
+  language?: TesseractLanguage | "chi_sim" | "jpn";
   timeoutMs?: number;
   abortSignal?: AbortSignal;
 }
@@ -262,21 +265,24 @@ export class TesseractOcrProvider implements InferenceProvider {
   readonly #executablePath: string;
   readonly #tessdataDir: string;
   readonly #manifest: Readonly<TesseractModelManifest>;
+  readonly #language: TesseractLanguage | "chi_sim" | "jpn";
   readonly #timeoutMs: number;
   readonly #abortSignal: AbortSignal | undefined;
 
   constructor(config: ProviderConfig) {
     if (!plainDataObject(config) ||
-      !allowedKeys(config, ["abortSignal", "executablePath", "tessdataDir", "timeoutMs"]) ||
+      !allowedKeys(config, ["abortSignal", "executablePath", "language", "tessdataDir", "timeoutMs"]) ||
       !isAbsolute(config.executablePath) || !isAbsolute(config.tessdataDir) ||
       resolve(config.executablePath) !== config.executablePath ||
       resolve(config.tessdataDir) !== config.tessdataDir ||
+      (config.language !== undefined && !["eng", "chi_sim", "jpn", "chi_sim+eng", "jpn+eng"].includes(config.language)) ||
       (config.timeoutMs !== undefined && (!Number.isSafeInteger(config.timeoutMs) ||
         config.timeoutMs < 100 || config.timeoutMs > 120_000)) ||
       (config.abortSignal !== undefined && !(config.abortSignal instanceof AbortSignal))) {
       throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR configuration is invalid.");
     }
     this.#manifest = FROZEN_TESSERACT_MANIFEST;
+    this.#language = config.language ?? "eng";
     this.#executablePath = config.executablePath;
     this.#tessdataDir = config.tessdataDir;
     this.#timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -294,7 +300,7 @@ export class TesseractOcrProvider implements InferenceProvider {
 
   async infer(context: ActorContext, request: InferenceRequest): Promise<InferenceResponse> {
     const captured = captureRequest(context, request);
-    const trusted = await openTrustedAssets(this.#executablePath, this.#tessdataDir, this.#manifest);
+    const trusted = await openTrustedAssets(this.#executablePath, this.#tessdataDir, this.#manifest, this.#language);
     try {
       await assertAssetState(trusted);
       const version = await this.#run(["--version"], new Uint8Array(), 64 * 1024);
@@ -302,7 +308,7 @@ export class TesseractOcrProvider implements InferenceProvider {
       await assertAssetState(trusted);
       const result = await this.#run([
         "stdin", "stdout", "--tessdata-dir", this.#tessdataDir,
-        "-l", "eng", "--psm", "6", "tsv",
+        "-l", this.#language, "--psm", "6", "tsv",
       ], captured.input.bytes, MAX_OCR_BYTES);
       await assertAssetState(trusted);
       if (result.exitCode !== 0) {
@@ -402,6 +408,7 @@ async function openTrustedAssets(
   executablePath: string,
   tessdataDir: string,
   manifest: Readonly<TesseractModelManifest>,
+  language: TesseractLanguage | "chi_sim" | "jpn",
 ): Promise<TrustedPath[]> {
   const opened: TrustedPath[] = [];
   const files = [
@@ -418,6 +425,9 @@ async function openTrustedAssets(
       opened.push(await openTrustedPath(path, true));
     }
     for (const [path, expected] of files) opened.push(await openTrustedPath(path, false, expected));
+    for (const optionalLanguage of language.split("+").filter((item) => item !== "eng")) {
+      opened.push(await openTrustedPath(join(tessdataDir, `${optionalLanguage}.traineddata`), false));
+    }
     return opened;
   } catch (error) {
     await Promise.allSettled(opened.map(({ handle }) => handle.close()));
@@ -465,6 +475,50 @@ export function validateTesseractAssetPathChainSync(
     throw new DomainError("OCR_MODEL_UNAVAILABLE", "Local OCR assets are unavailable.");
   } finally {
     for (const fd of opened) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
+/**
+ * Read-only presence gate for optional language data.  These files are not
+ * trusted for extraction by this function: it only establishes that the two
+ * exact, future-validation filenames are regular files in the same protected
+ * tessdata directory already selected by the English startup configuration.
+ * No asset bytes are returned or executed.
+ */
+export function inspectOptionalTesseractLanguageAssetsSync(tessdataDir: string): Readonly<{
+  chiSim: boolean;
+  jpn: boolean;
+}> {
+  if (typeof tessdataDir !== "string" || !isAbsolute(tessdataDir) || resolve(tessdataDir) !== tessdataDir) {
+    return Object.freeze({ chiSim: false, jpn: false });
+  }
+  const opened: number[] = [];
+  try {
+    for (const path of directoryAncestry(tessdataDir)) opened.push(openTrustedPathSync(path, true));
+  } catch {
+    return Object.freeze({ chiSim: false, jpn: false });
+  } finally {
+    for (const fd of opened) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+  return Object.freeze({
+    chiSim: hasTrustedOptionalLanguageAsset(tessdataDir, "chi_sim.traineddata"),
+    jpn: hasTrustedOptionalLanguageAsset(tessdataDir, "jpn.traineddata"),
+  });
+}
+
+function hasTrustedOptionalLanguageAsset(tessdataDir: string, filename: "chi_sim.traineddata" | "jpn.traineddata"): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openTrustedPathSync(join(tessdataDir, filename), false);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
       try { closeSync(fd); } catch { /* best effort */ }
     }
   }
@@ -726,8 +780,8 @@ export function parseTesseractTsv(bytes: Uint8Array): Record<string, unknown> {
     throw new DomainError("OCR_INVALID_OUTPUT", "Local OCR returned no bounded text.");
   }
   const normalized = ocrText.toUpperCase();
-  const reportType = normalized.includes("FUNDUS EXAM REPORT") ? "FUNDUS" :
-    normalized.includes("EYE EXAM REPORT") ? "EYE_EXAM" : null;
+  const reportType = normalized.includes("FUNDUS EXAM REPORT") || ocrText.includes("眼底检查报告") || ocrText.includes("眼底検査報告") ? "FUNDUS" :
+    normalized.includes("EYE EXAM REPORT") || ocrText.includes("眼科检查报告") || ocrText.includes("眼科検査報告") ? "EYE_EXAM" : null;
   return {
     subjectTypeCandidate: "PATIENT",
     workflowFamilyCandidate: "EYE_EXAM",

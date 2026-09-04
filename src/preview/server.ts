@@ -31,6 +31,9 @@ import {
   type StartupConfig,
 } from "../runtime/startup-config.ts";
 import { StartupReadiness } from "../runtime/readiness.ts";
+import { runLocalModelPreflight } from "../runtime/local-model-preflight.ts";
+import { inspectLocalOcrLanguageReleaseRecords } from "../runtime/local-ocr-language-release-record.ts";
+import { evaluateLocalPreviewReadiness, type LocalPreviewReadiness } from "./local-preview-readiness.ts";
 import { PreviewStore, type EmployeeStatus } from "./preview-store.ts";
 import type { ClinicalPreviewBackend } from "./clinical-preview-backend.ts";
 import { PostgresClinicalPreviewBackend, requireIdempotencyKey } from "./clinical-preview-backend.ts";
@@ -46,6 +49,9 @@ const OPEN_EXPECTATIONS_PATH = "/api/employee/open-expectations";
 const REGISTRATION_TRIGGER_PATH = "/api/employee/registration-trigger";
 const PRESCRIPTION_TRIGGER_PATH = "/api/employee/prescription-trigger";
 const PAYMENT_TRIGGER_PATH = "/api/employee/payment-trigger";
+const MANAGER_ATTENTION_GUIDANCE_PATH = "/api/manager/attention-guidance";
+const MANAGER_DEMO_SCENARIOS_PATH = "/api/manager/demo-scenarios";
+const MANAGER_OCR_REVIEWS_PATH = "/api/manager/ocr-reviews";
 export type EmployeeWorkspace = "RECEPTION" | "DOCTOR" | "EXAM" | "CASHIER";
 type EmployeeWorkspaceScope = EmployeeWorkspace | "ALL";
 const MAX_EXTRACTION_BODY_BYTES = 64 * 1024;
@@ -79,6 +85,8 @@ export function createPreviewServer(options: {
   evidenceObjectIngestion?: EvidenceObjectIngestionService;
   startupConfig?: StartupConfig;
   readiness?: StartupReadiness;
+  localPreviewReadiness?: () => Promise<LocalPreviewReadiness>;
+  lanEmployeeOnly?: boolean;
 } = {}) {
   const employeeContext = options.employeeContext ?? {
     clinicId: "demo-clinic",
@@ -105,6 +113,10 @@ export function createPreviewServer(options: {
   const uploadBodyTimeoutMs = boundedTimeout(options.uploadBodyTimeoutMs, DEFAULT_UPLOAD_BODY_TIMEOUT_MS);
   const startupConfig = options.startupConfig;
   const readiness = options.readiness ?? (startupConfig ? new StartupReadiness(startupConfig) : undefined);
+  // This is deliberately a safe, volatile preview projection. Durable OCR
+  // lineage remains inside the clinical repositories; raw text never crosses
+  // this transport boundary.
+  const ocrReviews: OcrReviewProjection[] = [];
 
   return createServer(async (request, response) => {
     try {
@@ -123,6 +135,9 @@ export function createPreviewServer(options: {
         options.evidenceObjectIngestion,
         startupConfig,
         readiness,
+        options.localPreviewReadiness,
+        options.lanEmployeeOnly === true,
+        ocrReviews,
       );
     } catch (error) {
       if (error instanceof DomainError) {
@@ -136,12 +151,13 @@ export function createPreviewServer(options: {
 
 export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.env) {
   const startupConfig = validateStartupConfig(env);
+  const lanEmployeeOnly = configuredLanEmployeeDemo(env);
   if (startupConfig.mode === "SYNTHETIC_PREVIEW") return createPreviewServer({ startupConfig });
   // Cloud and non-local-inference declarations are valid configuration snapshots,
   // but this ticket deliberately has no cloud/private adapters to construct.
   const localRuntime = createConfiguredLocalRuntime(startupConfig);
   if (!localRuntime) return createPreviewServer({ startupConfig, readiness: new StartupReadiness(startupConfig) });
-  const { pool, objects, inference, readinessProbes } = localRuntime;
+  const { pool, objects, inference, localRecommendations, readinessProbes, optionalOcrLanguageAssets, externalModelVolume } = localRuntime;
   const spec = {
     ...EYE_EXAM_EXTRACTION_SPEC,
     ...LOCAL_OCR_STARTUP_SPEC,
@@ -158,17 +174,44 @@ export function createConfiguredPreviewServer(env: NodeJS.ProcessEnv = process.e
     persistence: new ExtractionPersistenceRepository(pool, spec),
     goldenPath: persistedPath,
   });
+  const employeeWorkspace = configuredEmployeeWorkspace(env);
   const server = createPreviewServer({
     startupConfig,
-    employeeWorkspace: configuredEmployeeWorkspace(env),
+    employeeWorkspace,
+    employeeContext: configuredEmployeeContext(employeeWorkspace),
     readiness: new StartupReadiness(startupConfig, readinessProbes),
     clinicalBackend: new PostgresClinicalPreviewBackend(pool, {
       extractionGoldenPath: extractionPath,
       objectIngestion: new EvidenceObjectIngestionService(objects),
+      localRecommendations,
+      workspace: expectationWorkspaceForPreview(employeeWorkspace),
     }),
+    localPreviewReadiness: () => evaluateLocalPreviewReadiness({
+      readiness: new StartupReadiness(startupConfig, readinessProbes),
+      modelPreflight: hasLocalModelPreflight(env) ? () => runLocalModelPreflight(env) : undefined,
+      optionalOcrLanguageAssets,
+      optionalOcrLanguageReleases: inspectLocalOcrLanguageReleaseRecords,
+      externalModelVolume,
+      demoWorkspacePrepared: env.CLINIC_OS_DEMO_WORKSPACE_BOOTSTRAP === "1",
+    }),
+    lanEmployeeOnly,
   });
   server.once("close", () => { void pool.close(); });
   return server;
+}
+
+export function configuredLanEmployeeDemo(env: NodeJS.ProcessEnv): boolean {
+  const value = env.CLINIC_OS_LAN_DEMO;
+  if (value === undefined) return false;
+  if (value !== "LOCAL_WIFI_DEMO" || env.CLINIC_OS_DEMO_WORKSPACE_BOOTSTRAP !== "1") {
+    throw new DomainError("INVALID_LAN_DEMO", "LAN demonstration is not permitted.");
+  }
+  return true;
+}
+
+function hasLocalModelPreflight(env: NodeJS.ProcessEnv): boolean {
+  return typeof env.CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT === "string" &&
+    typeof env.CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID === "string";
 }
 
 function configuredEmployeeWorkspace(env: NodeJS.ProcessEnv): EmployeeWorkspace {
@@ -177,6 +220,14 @@ function configuredEmployeeWorkspace(env: NodeJS.ProcessEnv): EmployeeWorkspace 
     throw new DomainError("INVALID_WORKSPACE", "Employee workspace is invalid.");
   }
   return value as EmployeeWorkspace;
+}
+
+function configuredEmployeeContext(workspace: EmployeeWorkspace): ActorContext {
+  return { clinicId: "demo-clinic", actorId: `demo-${workspace.toLowerCase()}`, role: "EMPLOYEE" };
+}
+
+function expectationWorkspaceForPreview(workspace: EmployeeWorkspace): "DOCTOR" | "EXAM" | "CASHIER" | undefined {
+  return workspace === "RECEPTION" ? undefined : workspace;
 }
 
 async function route(
@@ -194,10 +245,20 @@ async function route(
   evidenceObjectIngestion?: EvidenceObjectIngestionService,
   startupConfig?: StartupConfig,
   readiness?: StartupReadiness,
+  localPreviewReadiness?: () => Promise<LocalPreviewReadiness>,
+  lanEmployeeOnly = false,
+  ocrReviews: OcrReviewProjection[] = [],
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const path = url.pathname;
+
+  if (lanEmployeeOnly && !isLoopbackAddress(request.socket.remoteAddress) &&
+      (path === "/manager" || path.startsWith("/api/manager/"))) {
+    request.resume();
+    sendJson(response, 403, { error: "LAN_MANAGER_FORBIDDEN", message: "Manager access is available only on this Mac." });
+    return;
+  }
 
   if (method === "GET" && path === "/api/health") {
     // Liveness is deliberately independent of all dependency probes.
@@ -223,6 +284,13 @@ async function route(
     sendJson(response, result.status === "ready" ? 200 : 503, result);
     return;
   }
+  if (method === "GET" && path === "/api/local-preview-readiness") {
+    const result = localPreviewReadiness
+      ? await localPreviewReadiness()
+      : await evaluateLocalPreviewReadiness({ readiness });
+    sendJson(response, 200, result);
+    return;
+  }
   if (startupConfig?.mode === "CONFIGURED" && !clinicalBackend && path.startsWith("/api/")) {
     sendJson(response, 503, { error: "CLOUD_PROVIDER_UNAVAILABLE", message: "Configured clinical adapters are unavailable." });
     return;
@@ -241,6 +309,7 @@ async function route(
       clinicalBackend,
       bodyTimeoutMs,
       operationTimeoutMs,
+      ocrReviews,
     );
     return;
   }
@@ -290,8 +359,7 @@ async function route(
   }
 
   if (method === "GET" && path === "/") {
-    response.writeHead(302, { location: "/employee" });
-    response.end();
+    send(response, 200, "text/html; charset=utf-8", await readFile(INDEX_FILE));
     return;
   }
   if (method === "GET" && (path === "/employee" || path === "/manager")) {
@@ -377,6 +445,35 @@ async function route(
     sendJson(response, 200, await clinicalBackend.listManagerAttentionGaps(managerContext));
     return;
   }
+  if (method === "GET" && path === MANAGER_ATTENTION_GUIDANCE_PATH) {
+    if (!clinicalBackend?.listManagerAttentionGuidance) {
+      request.resume();
+      sendJson(response, 503, {
+        error: "PERSISTED_MANAGER_ATTENTION_UNAVAILABLE",
+        message: "Manager attention guidance requires the persisted preview backend.",
+      });
+      return;
+    }
+    sendJson(response, 200, await clinicalBackend.listManagerAttentionGuidance(managerContext));
+    return;
+  }
+  if (method === "GET" && path === MANAGER_DEMO_SCENARIOS_PATH) {
+    if (!clinicalBackend?.listManagerDemoScenarios) {
+      request.resume();
+      sendJson(response, 503, {
+        error: "PERSISTED_MANAGER_DEMO_UNAVAILABLE",
+        message: "Manager demo scenarios require the persisted preview backend.",
+      });
+      return;
+    }
+    sendJson(response, 200, await clinicalBackend.listManagerDemoScenarios(managerContext));
+    return;
+  }
+  if (method === "GET" && path === MANAGER_OCR_REVIEWS_PATH) {
+    assertActorAccess(managerContext, managerContext.clinicId, "MANAGER");
+    sendJson(response, 200, ocrReviews.map((item) => structuredClone(item)));
+    return;
+  }
   if (method === "POST" && path === "/api/manager/decisions") {
     const body = await jsonBody(request);
     rejectUnexpectedKeys(
@@ -430,6 +527,10 @@ async function route(
     return;
   }
   sendJson(response, 404, { error: "NOT_FOUND", message: "Preview route not found." });
+}
+
+export function isLoopbackAddress(address: string | undefined): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
 function assertEmployeeWorkspaceScope(value: unknown): asserts value is EmployeeWorkspaceScope {
@@ -621,6 +722,7 @@ async function handleExamReportExtraction(
   clinicalBackend: ClinicalPreviewBackend | undefined,
   bodyTimeoutMs: number,
   operationTimeoutMs: number,
+  ocrReviews: OcrReviewProjection[],
 ): Promise<void> {
   try {
     assertActorAccess(employeeContext, employeeContext.clinicId, "EMPLOYEE");
@@ -638,7 +740,22 @@ async function handleExamReportExtraction(
       clinicalBackend.submitExamReportConsequence(employeeContext, command),
       operationTimeoutMs,
     );
-    sendJson(response, 200, projectExtractionResult(result));
+    const projection = projectExtractionResult(result);
+    if (projection.status === "REVIEW_REQUIRED" && projection.reviewStage === "EXTRACTION") {
+      const review = Object.freeze({
+        artifactId: projection.artifactId,
+        status: "REVIEW_REQUIRED",
+        reportType: projection.ocr.reportType,
+        missingFields: projection.ocr.missingFields,
+        confidenceBasisPoints: projection.ocr.confidenceBasisPoints,
+        reasonCodes: projection.reasonCodes,
+      });
+      const existing = ocrReviews.findIndex((item) => item.artifactId === review.artifactId);
+      if (existing >= 0) ocrReviews.splice(existing, 1);
+      ocrReviews.unshift(review);
+      ocrReviews.splice(50);
+    }
+    sendJson(response, 200, projection);
   } catch (error) {
     const mapped = mapExtractionError(error);
     if (!response.writableEnded && !response.destroyed) sendJson(response, mapped.status, mapped.body);
@@ -700,7 +817,7 @@ async function handleUploadError(response: ServerResponse, error: unknown): Prom
 
 type StagedUpload = { directory: string; file: string; bytes: Buffer };
 type MultipartContentType = { boundary: string };
-type ParsedMultipart = { mediaType: "image/png" | "image/jpeg" | "application/pdf"; bytes: Uint8Array };
+type ParsedMultipart = { mediaType: "image/png" | "image/jpeg"; bytes: Uint8Array };
 
 function requireMultipartContentType(value: string | string[] | undefined): MultipartContentType {
   if (typeof value !== "string") throw new DomainError("UNSUPPORTED_CONTENT_TYPE", "Content-Type is not supported.");
@@ -846,7 +963,7 @@ function parsePartHeaders(text: string): { filename: string; mediaType: ParsedMu
   const type = /^Content-Type: ([^\r\n]+)$/i.exec(lines[1]);
   if (!disposition || !type) throw invalidUpload();
   const mediaType = type[1].toLowerCase();
-  if (!(mediaType === "image/png" || mediaType === "image/jpeg" || mediaType === "application/pdf")) {
+  if (!(mediaType === "image/png" || mediaType === "image/jpeg")) {
     throw new DomainError("UNSUPPORTED_CONTENT_TYPE", "Evidence media type is not supported.");
   }
   const filename = disposition[1];
@@ -859,7 +976,6 @@ function validateUploadedPart(headers: { filename: string; mediaType: ParsedMult
   const signatures: Record<ParsedMultipart["mediaType"], Buffer> = {
     "image/png": Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
     "image/jpeg": Buffer.from([255, 216, 255]),
-    "application/pdf": Buffer.from("%PDF-", "ascii"),
   };
   if (!bytes.subarray(0, signatures[headers.mediaType].length).equals(signatures[headers.mediaType])) throw invalidUpload();
   return { mediaType: headers.mediaType, bytes: new Uint8Array(bytes) };
@@ -896,7 +1012,7 @@ function safePublicObjectRef(value: unknown): {
   objectId: string;
   contentSha256: string;
   sizeBytes: number;
-  mediaType: "image/png" | "image/jpeg" | "application/pdf";
+  mediaType: "image/png" | "image/jpeg";
 } {
   try {
     const ref = structuredClone(value) as Record<string, unknown>;
@@ -905,12 +1021,12 @@ function safePublicObjectRef(value: unknown): {
         !/^upload-[a-f0-9]{64}$/.test(ref.objectId) || typeof ref.contentSha256 !== "string" ||
         !/^[a-f0-9]{64}$/.test(ref.contentSha256) || typeof ref.sizeBytes !== "number" ||
         !Number.isSafeInteger(ref.sizeBytes) || ref.sizeBytes <= 0 || ref.sizeBytes > 25 * 1024 * 1024 ||
-        typeof ref.mediaType !== "string" || !["image/png", "image/jpeg", "application/pdf"].includes(ref.mediaType)) throw new Error();
+        typeof ref.mediaType !== "string" || !["image/png", "image/jpeg"].includes(ref.mediaType)) throw new Error();
     return {
       objectId: ref.objectId as string,
       contentSha256: ref.contentSha256 as string,
       sizeBytes: ref.sizeBytes as number,
-      mediaType: ref.mediaType as "image/png" | "image/jpeg" | "application/pdf",
+      mediaType: ref.mediaType as "image/png" | "image/jpeg",
     };
   } catch {
     throw new DomainError("INVALID_OBJECT_STORE_RESPONSE", "Evidence object storage returned an invalid reference.");
@@ -991,7 +1107,7 @@ function parseExtractionBody(text: string): ExtractionBody {
       !isObjectId(body.objectRef.objectId) || !/^[a-f0-9]{64}$/.test(body.objectRef.contentSha256) ||
       !Number.isSafeInteger(body.objectRef.sizeBytes) || body.objectRef.sizeBytes <= 0 ||
       body.objectRef.sizeBytes > 25 * 1024 * 1024 ||
-      !["image/png", "image/jpeg", "application/pdf"].includes(body.objectRef.mediaType)) {
+      !["image/png", "image/jpeg"].includes(body.objectRef.mediaType)) {
     throw new DomainError("INVALID_REQUEST", "Request body is invalid.");
   }
   return body;
@@ -1076,7 +1192,28 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-function projectExtractionResult(value: unknown): Record<string, unknown> {
+type SafeOcrProjection = Readonly<{
+  reportType: "EYE_EXAM" | "FUNDUS" | null;
+  missingFields: readonly "reportType"[];
+  confidenceBasisPoints: number;
+}>;
+type OcrReviewProjection = Readonly<SafeOcrProjection & {
+  artifactId: string;
+  status: "REVIEW_REQUIRED";
+  reasonCodes: readonly string[];
+}>;
+
+function projectExtractionResult(value: unknown): {
+  status: "COMPLETED" | "REVIEW_REQUIRED";
+  reviewStage: "EXTRACTION" | "COMPOSITION" | null;
+  artifactId: string;
+  workflowId: string | null;
+  expectationId: string | null;
+  expectationState: string | null;
+  verificationStatus: string | null;
+  reasonCodes: string[];
+  ocr: SafeOcrProjection;
+} {
   let result: ProcessGoldenPathResult;
   try {
     result = structuredClone(value) as ProcessGoldenPathResult;
@@ -1085,6 +1222,7 @@ function projectExtractionResult(value: unknown): Record<string, unknown> {
     throw new DomainError("INVALID_APPLICATION_RESULT", "Application returned an invalid result.");
   }
   const artifactId = result.extraction.artifact.id;
+  const ocr = projectOcrCandidate(result.extraction.candidate);
   if (result.status === "REVIEW_REQUIRED") {
     return {
       status: "REVIEW_REQUIRED",
@@ -1097,6 +1235,7 @@ function projectExtractionResult(value: unknown): Record<string, unknown> {
       reasonCodes: result.reviewStage === "EXTRACTION"
         ? [...result.extraction.reasonCodes]
         : ["MATCHING_AMBIGUITY"],
+      ocr,
     };
   }
   return {
@@ -1108,7 +1247,26 @@ function projectExtractionResult(value: unknown): Record<string, unknown> {
     expectationState: result.goldenPath.expectation.expectation.state,
     verificationStatus: result.goldenPath.verification.result.status,
     reasonCodes: [],
+    ocr,
   };
+}
+
+function projectOcrCandidate(value: unknown): SafeOcrProjection {
+  if (!isPlainRecord(value) || !exactKeys(value, ["confidence", "fields", "missingFields", "subjectTypeCandidate", "workflowFamilyCandidate"]) ||
+      !isPlainRecord(value.fields) || !Array.isArray(value.missingFields) ||
+      !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) {
+    throw new DomainError("INVALID_APPLICATION_RESULT", "Application returned an invalid result.");
+  }
+  const reportType = value.fields.reportType;
+  if (reportType !== null && reportType !== "EYE_EXAM" && reportType !== "FUNDUS" ||
+      value.missingFields.some((field) => field !== "reportType") || value.missingFields.length > 1) {
+    throw new DomainError("INVALID_APPLICATION_RESULT", "Application returned an invalid result.");
+  }
+  return Object.freeze({
+    reportType: reportType as "EYE_EXAM" | "FUNDUS" | null,
+    missingFields: Object.freeze([...value.missingFields] as "reportType"[]),
+    confidenceBasisPoints: Math.round(value.confidence * 10_000),
+  });
 }
 
 function validateApplicationResult(result: ProcessGoldenPathResult): void {
@@ -1303,6 +1461,13 @@ if (import.meta.main) {
   const port = validateStartupConfig(process.env).port;
   const server = createConfiguredPreviewServer();
   server.listen(port, host, () => {
+    if (process.env.CLINIC_OS_LAN_DEMO === "LOCAL_WIFI_DEMO") {
+      const lanHost = process.env.CLINIC_OS_LAN_ADDRESS;
+      if (!lanHost) throw new Error("INVALID_LAN_DEMO");
+      console.log(`Employee mobile: http://${lanHost}:${port}/employee`);
+      console.log(`Manager (this Mac): http://127.0.0.1:${port}/manager`);
+      return;
+    }
     console.log(`Employee: http://${host}:${port}/employee`);
     console.log(`Manager:  http://${host}:${port}/manager`);
   });

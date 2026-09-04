@@ -1,0 +1,13 @@
+{
+  "manifestVersion": "clinic-os-local-ocr-evaluation-chi-sim-fixtures-v1",
+  "maximumCharacterErrorRate": 0.02,
+  "fixtures": [
+    {
+      "file": "tesseract-chi-sim-synthetic.png",
+      "mediaType": "image/png",
+      "sha256": "08f2ea15aeb0ba5f14cef3d4a10d0cfeef9a6f0ddc5cb549d94e4e3d318a27a2",
+      "expectedText": "一二三",
+      "reportType": "EYE_EXAM"
+    }
+  ]
+}

@@ -31,7 +31,7 @@ function completedResult() {
     extraction: {
       status: "READY",
       artifact: { id: "artifact:report-0001" },
-      factCard: {}, candidate: {}, reasonCodes: [], lineage: {},
+      factCard: {}, candidate: candidate(), reasonCodes: [], lineage: {},
     },
     goldenPath: {
       status: "COMPLETED",
@@ -49,7 +49,7 @@ function reviewResult(stage: "EXTRACTION" | "COMPOSITION") {
     extraction: {
       status: stage === "EXTRACTION" ? "REVIEW_REQUIRED" : "READY",
       artifact: { id: "artifact:report-0001" },
-      factCard: null, candidate: {},
+      factCard: null, candidate: candidate(stage === "EXTRACTION" ? null : "EYE_EXAM"),
       reasonCodes: stage === "EXTRACTION" ? ["LOW_CONFIDENCE"] : [], lineage: {},
     },
     goldenPath: stage === "EXTRACTION" ? null : {
@@ -57,6 +57,14 @@ function reviewResult(stage: "EXTRACTION" | "COMPOSITION") {
       attachment: { resolution: { kind: "REVIEW_REQUIRED", candidateWorkflowIds: ["secret-id"] } },
       expectation: null, verification: null,
     },
+  };
+}
+
+function candidate(reportType: "EYE_EXAM" | null = "EYE_EXAM") {
+  return {
+    subjectTypeCandidate: "PATIENT", workflowFamilyCandidate: "EYE_EXAM",
+    fields: { reportType, ocrText: "never transport this" },
+    missingFields: reportType ? [] : ["reportType"], confidence: reportType ? 0.95 : 0.55,
   };
 }
 
@@ -123,8 +131,9 @@ test("local extraction transport injects authority and returns bounded completed
       status: "COMPLETED", reviewStage: null, artifactId: "artifact:report-0001",
       workflowId: "workflow:exam-0001", expectationId: "expectation:registration-0001",
       expectationState: "MET", verificationStatus: "VERIFIED", reasonCodes: [],
+      ocr: { reportType: "EYE_EXAM", missingFields: [], confidenceBasisPoints: 9500 },
     });
-    assert.doesNotMatch(JSON.stringify(result.body), /DEMO-001|object-0001|a{64}|path|lineage|provider/i);
+    assert.doesNotMatch(JSON.stringify(result.body), /DEMO-001|object-0001|a{64}|path|lineage|provider|never transport/i);
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].context, EMPLOYEE);
     assert.equal((calls[0].command as any).extraction.kind, "EXAM_REPORT");
@@ -144,9 +153,19 @@ test("extraction and composition review are distinct safe HTTP outcomes", async 
       assert.equal(result.body.reviewStage, stage);
       assert.equal(result.body.artifactId, body.artifactId);
       assert.equal(result.body.workflowId, null);
+      assert.deepEqual(result.body.ocr, stage === "EXTRACTION"
+        ? { reportType: null, missingFields: ["reportType"], confidenceBasisPoints: 5500 }
+        : { reportType: "EYE_EXAM", missingFields: [], confidenceBasisPoints: 9500 });
       assert.deepEqual(result.body.reasonCodes, stage === "EXTRACTION" ? ["LOW_CONFIDENCE"] : ["MATCHING_AMBIGUITY"]);
       assert.doesNotMatch(JSON.stringify(result.body), /secret-id|DEMO-001|object-0001/);
       assert.equal(calls.length, 1);
+      const managerReviews = await (await fetch(`${url}/api/manager/ocr-reviews`)).json();
+      assert.deepEqual(managerReviews, stage === "EXTRACTION" ? [{
+          artifactId: "artifact:report-0001", status: "REVIEW_REQUIRED",
+          reportType: null, missingFields: ["reportType"], confidenceBasisPoints: 5500,
+          reasonCodes: ["LOW_CONFIDENCE"],
+        }] : []);
+      assert.doesNotMatch(JSON.stringify(managerReviews), /never transport|DEMO-001|object-0001/i);
     });
   }
 });

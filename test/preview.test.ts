@@ -68,6 +68,21 @@ function update(topicId: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+test("local readiness surface links only to unchanged workspaces and exposes bounded synthetic state", async () => {
+  await withServer(async (baseUrl) => {
+    const page = await fetch(baseUrl);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type") ?? "", /text\/html/);
+    const readiness = await fetch(`${baseUrl}/api/local-preview-readiness`);
+    assert.equal(readiness.status, 200);
+    const body = await readiness.json();
+    assert.deepEqual(body.links, { employee: "/employee", manager: "/manager" });
+    assert.deepEqual(body.checks.map((item: { status: string }) => item.status), ["UNAVAILABLE", "UNAVAILABLE", "UNAVAILABLE", "UNAVAILABLE", "UNAVAILABLE", "UNAVAILABLE", "UNAVAILABLE", "NOT_CONFIGURED", "NOT_PREPARED"]);
+    assert.doesNotMatch(JSON.stringify(body), /postgres|path|prompt|object|workflow|error/i);
+    assert.equal((await fetch(`${baseUrl}/api/local-preview-readiness`, { method: "POST" })).status, 404);
+  });
+});
+
 test("employee, manager and health endpoints respond", async () => {
   await withServer(async (baseUrl) => {
     for (const path of ["/employee", "/manager"]) {

@@ -33,6 +33,9 @@ const migrationSql = await readFile(
 ) + await readFile(
   new URL("../src/persistence/migrations/0007_extraction_operation_identity.sql", import.meta.url),
   "utf8",
+) + await readFile(
+  new URL("../src/persistence/migrations/0008_expectation_workspace_assignment.sql", import.meta.url),
+  "utf8",
 );
 
 async function migratedDb(): Promise<PGlite> {
@@ -111,6 +114,7 @@ test("fresh migration creates the required tables", async () => {
         "evidence_fact_card",
         "expectation",
         "expectation_transition",
+        "expectation_workspace_assignment",
         "manager_decision",
         "s2_verification",
         "schema_migration",
@@ -137,11 +141,12 @@ test("identical migration rerun is a no-op", async () => {
         "0005_manager_decision_saga",
         "0006_extraction_lineage",
         "0007_extraction_operation_identity",
+        "0008_expectation_workspace_assignment",
       ],
     );
     assert.deepEqual(await applyMigrations(db, migrations), []);
     const ledger = await db.query("SELECT id FROM schema_migration");
-    assert.equal(ledger.rows.length, 7);
+    assert.equal(ledger.rows.length, 8);
   } finally {
     await db.close();
   }

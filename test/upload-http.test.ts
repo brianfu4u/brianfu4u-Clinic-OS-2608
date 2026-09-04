@@ -61,12 +61,11 @@ async function upload(url: string, body: Buffer, key = "upload-key-0001", bounda
   return { response, body: await response.json() as Record<string, unknown> };
 }
 
-test("PNG, JPEG and PDF uploads return detached bounded references", async () => {
+test("PNG and JPEG uploads return detached bounded references", async () => {
   await withServer(async (url) => {
     const cases = [
       ["image/png", new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1])],
       ["image/jpeg", new Uint8Array([255, 216, 255, 1])],
-      ["application/pdf", new TextEncoder().encode("%PDF-1.7\n")],
     ] as const;
     for (const [mediaType, bytes] of cases) {
       const result = await upload(url, multipart("clinic-boundary", mediaType, bytes), `key-${mediaType.replace(/\W/g, "")}`);
@@ -106,6 +105,7 @@ test("malformed, repeated, unsupported and authority-shaped multipart bodies fai
     const cases: Array<[Buffer, string, number, string]> = [
       [Buffer.from("not multipart"), "bad-key-0001", 400, "INVALID_UPLOAD"],
       [multipart("clinic-boundary", "image/gif", new Uint8Array([71, 73, 70, 56])), "bad-key-0002", 415, "UNSUPPORTED_CONTENT_TYPE"],
+      [multipart("clinic-boundary", "application/pdf", new TextEncoder().encode("%PDF-1.7\n")), "bad-key-0002a", 415, "UNSUPPORTED_CONTENT_TYPE"],
       [multipart("clinic-boundary", "image/jpeg", new Uint8Array([137, 80, 78, 71])), "bad-key-0003", 400, "INVALID_UPLOAD"],
       [Buffer.concat([valid.subarray(0, -2 - Buffer.byteLength("--clinic-boundary--\r\n")), Buffer.from("\r\n--clinic-boundary\r\n"), valid]), "bad-key-0004", 400, "INVALID_UPLOAD"],
       [multipart("clinic-boundary", "image/png", new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), "../secret.png"), "bad-key-0005", 400, "INVALID_UPLOAD"],

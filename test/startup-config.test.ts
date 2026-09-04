@@ -87,6 +87,21 @@ test("profile/provider incompatibility and port bounds fail closed", () => {
   assert.throws(() => validateStartupConfig(cloud({ PORT: "65536" })), (error) => error instanceof DomainError && error.code === "PORT_INVALID");
 });
 
+test("approved local demo transport settings do not bypass the configuration boundary", () => {
+  const config = validateStartupConfig(cloud({
+    CLINIC_OS_DEMO_WORKSPACE_BOOTSTRAP: "1",
+    CLINIC_OS_PREVIEW_WORKSPACE: "EXAM",
+    CLINIC_OS_LAN_DEMO: "LOCAL_WIFI_DEMO",
+    CLINIC_OS_LAN_ADDRESS: "192.168.1.20",
+    PREVIEW_HOST: "0.0.0.0",
+  }));
+  assert.equal(config.snapshot.profile, "CLOUD");
+  assert.throws(
+    () => validateStartupConfig(cloud({ CLINIC_OS_DEMO_DATABASE_URL: "postgresql://demo@localhost:5432/clinic_os_demo" })),
+    (error) => error instanceof DomainError && error.code === "UNKNOWN_CONFIGURATION_FIELD",
+  );
+});
+
 test("Strict cannot dilute its declared local OCR capability", () => {
   const strict = {
     CLINIC_OS_PROFILE: "ON_PREM_STRICT",

@@ -85,6 +85,9 @@ type TransitionRow = {
   evidence_artifact_ids: string[];
 };
 
+export type ExpectationWorkspace = "DOCTOR" | "EXAM" | "CASHIER";
+type AssignmentRow = { workspace: ExpectationWorkspace };
+
 type LinkedArtifact = { artifact: Artifact; attachedAt: string };
 
 const SPEC_KEYS = ["consequenceKind", "dueAt", "id", "triggerKind", "triggeredAt"];
@@ -198,10 +201,12 @@ export class ExpectationRepository {
             "Initialization transition is missing or has different content.",
           );
         }
+        await ensureWorkspaceAssignment(client, existing);
         return structuredClone({ expectation: existing, transition: existingTransition });
       }
 
       await insertExpectation(client, evaluated);
+      await ensureWorkspaceAssignment(client, evaluated);
       const storedExpectation = await findExpectation(
         client,
         captured.context.clinicId,
@@ -554,6 +559,31 @@ async function insertExpectation(client: TenantQueryClient, expectation: Expecta
       expectation.evaluatedAt,
     ],
   );
+}
+
+export function workspaceForExpectationConsequence(kind: string): ExpectationWorkspace {
+  if (kind === "PRESCRIPTION") return "DOCTOR";
+  if (kind === "EXAM_REPORT") return "EXAM";
+  if (kind === "PAYMENT") return "CASHIER";
+  throw new DomainError("EXPECTATION_WORKSPACE_REQUIRED", "Expectation consequence is not assignable to a preview workspace.");
+}
+
+async function ensureWorkspaceAssignment(client: TenantQueryClient, expectation: Expectation): Promise<void> {
+  const workspace = workspaceForExpectationConsequence(expectation.consequenceKind);
+  await client.query(
+    `INSERT INTO expectation_workspace_assignment (clinic_id, expectation_id, workspace)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (clinic_id, expectation_id) DO NOTHING`,
+    [expectation.clinicId, expectation.id, workspace],
+  );
+  const result = await client.query<AssignmentRow>(
+    `SELECT workspace FROM expectation_workspace_assignment
+      WHERE clinic_id = $1 AND expectation_id = $2`,
+    [expectation.clinicId, expectation.id],
+  );
+  if (result.rows.length !== 1 || result.rows[0].workspace !== workspace) {
+    throw new DomainError("EXPECTATION_WORKSPACE_CONFLICT", "Expectation workspace assignment conflicts with the rule.");
+  }
 }
 
 async function insertTransition(

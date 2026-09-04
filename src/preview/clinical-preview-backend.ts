@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import { types } from "node:util";
 
 import { PersistedGoldenPath } from "../application/persisted-golden-path.ts";
+import {
+  LocalManagerRecommendationService,
+  type ManagerAttentionRecommendationResult,
+} from "../application/local-manager-recommendation.ts";
 import {
   ExtractionGoldenPath,
   type ProcessGoldenPathCommand,
@@ -13,6 +18,7 @@ import { DomainError } from "../domain/errors.ts";
 import { CaptureRepository } from "../persistence/capture-repository.ts";
 import type { DatabasePool } from "../persistence/database-contracts.ts";
 import { ExpectationRepository } from "../persistence/expectation-repository.ts";
+import type { ExpectationWorkspace } from "../persistence/expectation-repository.ts";
 import {
   EmployeeOpenExpectationReadRepository,
   type EmployeeOpenExpectationPage,
@@ -61,6 +67,20 @@ export interface ClinicalManagerDecisionInput {
   receivedAt: string;
 }
 
+/**
+ * Browser-safe local guidance.  It has no workflow or patient correlation;
+ * callers retain the existing ordered attention projection separately.
+ */
+export type ManagerAttentionGuidanceItem =
+  | { status: "AVAILABLE"; suggestionCode: "DOCUMENT_COMPLETENESS_REVIEW" | "DOCUMENT_CONSISTENCY_REVIEW"; reasonCodes: string[] }
+  | { status: "UNAVAILABLE"; code: "LOCAL_RECOMMENDATION_UNAVAILABLE" };
+
+/** A fixed, browser-safe explanation of the dedicated five-case demo only. */
+export interface ManagerDemoScenarioItem {
+  scenario: "NORMAL_COMPLETION" | "OPEN_WORK" | "OVERDUE_WORK" | "ATTENTION_REVIEW" | "IDEMPOTENT_REPLAY";
+  status: "READY" | "NOT_PREPARED";
+}
+
 export interface ClinicalPreviewBackend {
   listOpenExamReportExpectations(
     context: ActorContext,
@@ -92,6 +112,8 @@ export interface ClinicalPreviewBackend {
   ): Promise<StoredObjectRef>;
   listManagerClosures(context: ActorContext): Promise<ManagerClosureReadItem[]>;
   listManagerAttentionGaps?(context: ActorContext): Promise<ManagerAttentionGapItem[]>;
+  listManagerAttentionGuidance?(context: ActorContext): Promise<ManagerAttentionGuidanceItem[]>;
+  listManagerDemoScenarios?(context: ActorContext): Promise<ManagerDemoScenarioItem[]>;
   submitManagerDecision(
     context: ActorContext,
     input: ClinicalManagerDecisionInput,
@@ -107,10 +129,14 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
   readonly #closures: ManagerClosureReadRepository;
   readonly #decisions: ManagerDecisionRepository;
   readonly #openExpectations: EmployeeOpenExpectationReadRepository;
+  readonly #localRecommendations: Pick<LocalManagerRecommendationService, "recommend"> | null;
+  readonly #workspace: ExpectationWorkspace | undefined;
 
   constructor(pool: DatabasePool, options: {
     extractionGoldenPath?: ExtractionGoldenPath;
     objectIngestion?: Pick<EvidenceObjectIngestionService, "ingest">;
+    localRecommendations?: Pick<LocalManagerRecommendationService, "recommend"> | null;
+    workspace?: ExpectationWorkspace;
   } = {}) {
     this.#capture = new CaptureRepository(pool);
     this.#path = new PersistedGoldenPath({
@@ -124,6 +150,8 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     this.#openExpectations = new EmployeeOpenExpectationReadRepository(pool);
     this.#extractionPath = options.extractionGoldenPath;
     this.#objectIngestion = options.objectIngestion;
+    this.#localRecommendations = options.localRecommendations ?? null;
+    this.#workspace = options.workspace;
   }
 
   listOpenExamReportExpectations(
@@ -131,7 +159,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     query: EmployeeOpenExpectationQuery,
   ): Promise<EmployeeOpenExpectationPage> {
     assertActorAccess(context, context.clinicId, "EMPLOYEE");
-    return this.#openExpectations.listOpenExamReportExpectations(context, query);
+    return this.#openExpectations.listOpenExamReportExpectations(context, query, this.#workspace);
   }
 
   listOpenPaymentExpectations(
@@ -139,7 +167,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     query: EmployeeOpenExpectationQuery,
   ): Promise<EmployeeOpenExpectationPage> {
     assertActorAccess(context, context.clinicId, "EMPLOYEE");
-    return this.#openExpectations.listOpenFlowExpectations(context, query, "PAYMENT");
+    return this.#openExpectations.listOpenFlowExpectations(context, query, "PAYMENT", undefined, this.#workspace);
   }
 
   async uploadEvidenceObject(
@@ -172,7 +200,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     const page = await this.#openExpectations.listOpenExamReportExpectations(capturedContext, {
       asOf: capturedCommand.operation?.evaluatedAt,
       limit: 50,
-    });
+    }, this.#workspace);
     const selected = page.items.some((item) => item.expectationId === capturedCommand.operation?.expectationId);
     if (!selected && !(await this.#extractionPath.canResumeExisting(capturedContext, capturedCommand))) {
       throw new DomainError("EXPECTATION_SELECTION_REQUIRED", "A current employee expectation selection is required.");
@@ -429,7 +457,7 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
     asOf: string,
   ): Promise<string | null> {
     const page = await this.#openExpectations.listOpenFlowExpectations(
-      context, { asOf, limit: 2 }, consequenceKind, identityAnchor,
+      context, { asOf, limit: 2 }, consequenceKind, identityAnchor, this.#workspace,
     );
     if (page.items.length === 0) {
       throw new DomainError("EXPECTATION_SELECTION_REQUIRED", "A single current flow expectation is required.");
@@ -453,6 +481,33 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
 
   listManagerAttentionGaps(context: ActorContext): Promise<ManagerAttentionGapItem[]> {
     return this.#closures.listManagerAttentionGaps(context);
+  }
+
+  async listManagerAttentionGuidance(context: ActorContext): Promise<ManagerAttentionGuidanceItem[]> {
+    const captured = snapshotActorContext(context);
+    // Authority is established before the attention read or any model call.
+    assertActorAccess(captured, captured.clinicId, "MANAGER");
+    const gaps = await this.#closures.listManagerAttentionGaps(captured);
+    if (!this.#localRecommendations) return gaps.map(unavailableGuidance);
+    return Promise.all(gaps.map(async (gap) => {
+      try {
+        return projectGuidance(await this.#localRecommendations!.recommend(captured, gap));
+      } catch {
+        return unavailableGuidance();
+      }
+    }));
+  }
+
+  async listManagerDemoScenarios(context: ActorContext): Promise<ManagerDemoScenarioItem[]> {
+    const captured = snapshotActorContext(context);
+    // Keep this local walkthrough behind the same manager boundary as the
+    // projections it explains. It never invokes an operational service.
+    assertActorAccess(captured, captured.clinicId, "MANAGER");
+    const [closures, gaps] = await Promise.all([
+      this.#closures.listManagerClosures(captured),
+      this.#closures.listManagerAttentionGaps(captured),
+    ]);
+    return projectManagerDemoScenarios(closures, gaps);
   }
 
   async submitManagerDecision(
@@ -486,6 +541,87 @@ export class PostgresClinicalPreviewBackend implements ClinicalPreviewBackend {
       return this.#decisions.recordManagerDecision(context, command);
     }
   }
+}
+
+const GUIDANCE_REASONS = new Set([
+  "INVALID_DOCUMENT", "KIND_CONFLICT", "MISSING_REGISTRATION", "MISSING_PRESCRIPTION",
+  "MISSING_EXAM_REPORT", "MISSING_PAYMENT", "DUPLICATE_DOCUMENT", "IDENTITY_CONFLICT",
+  "WORKFLOW_FAMILY_CONFLICT", "TIME_ORDER_CONFLICT", "EXPECTATION_MISSING",
+  "VERIFICATION_MISSING", "TERMINAL_DECISION_MISSING", "EXPECTATION_UNMET",
+  "VERIFICATION_CONFLICT", "TRIGGER_NOT_FOUND", "CONSEQUENCE_NOT_FOUND",
+  "EXPECTATION_EVIDENCE_CONFLICT", "CHAIN_OPEN", "CHAIN_UNMET", "CHAIN_VOIDED",
+]);
+const GUIDANCE_SUGGESTIONS = new Set(["DOCUMENT_COMPLETENESS_REVIEW", "DOCUMENT_CONSISTENCY_REVIEW"]);
+
+const DEMO_SCENARIOS = [
+  ["NORMAL_COMPLETION", "DEMO-FIVE-01"],
+  ["OPEN_WORK", "DEMO-FIVE-02"],
+  ["OVERDUE_WORK", "DEMO-FIVE-03"],
+  ["ATTENTION_REVIEW", "DEMO-FIVE-04"],
+  ["IDEMPOTENT_REPLAY", "DEMO-FIVE-05"],
+] as const satisfies ReadonlyArray<readonly [ManagerDemoScenarioItem["scenario"], string]>;
+
+/**
+ * Deliberately recognize only WO-044's fixed synthetic rows, then discard the
+ * correlation values. This keeps the walkthrough explanatory rather than a
+ * general-purpose manager search or a new source of authority.
+ */
+export function projectManagerDemoScenarios(
+  closures: readonly ManagerClosureReadItem[],
+  attention: readonly ManagerAttentionGapItem[],
+): ManagerDemoScenarioItem[] {
+  const closureByAnchor = new Map(closures.map((item) => [item.identityAnchor, item]));
+  const attentionWorkflowIds = new Set(attention.map((item) => item.workflowId));
+  return DEMO_SCENARIOS.map(([scenario, anchor]) => {
+    const closure = closureByAnchor.get(anchor);
+    const ready = scenario === "NORMAL_COMPLETION" || scenario === "IDEMPOTENT_REPLAY"
+      ? closure?.workflowStatus === "CLOSED" && closure.expectationState === "MET" &&
+        closure.verificationStatus === "VERIFIED" && closure.latestDecision?.action === "CLOSE_STANDARD"
+      : scenario === "ATTENTION_REVIEW"
+        ? closure?.workflowStatus === "OPEN" && attentionWorkflowIds.has(closure.workflowId)
+      : closure?.workflowStatus === "OPEN" &&
+          (scenario === "OVERDUE_WORK" ? closure.expectationState === "UNMET" : closure.expectationState === "OPEN") &&
+          closure.verificationStatus === "PENDING";
+    return Object.freeze({ scenario, status: ready ? "READY" : "NOT_PREPARED" });
+  });
+}
+
+function projectGuidance(value: ManagerAttentionRecommendationResult): ManagerAttentionGuidanceItem {
+  try {
+    const record = plainGuidanceRecord(value);
+    if (record.status === "UNAVAILABLE" && exactGuidanceKeys(record, ["status", "code"]) &&
+        record.code === "LOCAL_RECOMMENDATION_UNAVAILABLE") return unavailableGuidance();
+    if (record.status !== "AVAILABLE" || !exactGuidanceKeys(record, ["status", "schemaVersion", "suggestionCode", "reasonCodes"]) ||
+        record.schemaVersion !== "clinic-os/manager-attention-guidance/v1" ||
+        typeof record.suggestionCode !== "string" || !GUIDANCE_SUGGESTIONS.has(record.suggestionCode) ||
+        !Array.isArray(record.reasonCodes) || record.reasonCodes.length > 21 ||
+        record.reasonCodes.some((reason) => typeof reason !== "string" || !GUIDANCE_REASONS.has(reason))) return unavailableGuidance();
+    return {
+      status: "AVAILABLE",
+      suggestionCode: record.suggestionCode as "DOCUMENT_COMPLETENESS_REVIEW" | "DOCUMENT_CONSISTENCY_REVIEW",
+      reasonCodes: [...record.reasonCodes] as string[],
+    };
+  } catch {
+    return unavailableGuidance();
+  }
+}
+
+function unavailableGuidance(): ManagerAttentionGuidanceItem {
+  return { status: "UNAVAILABLE", code: "LOCAL_RECOMMENDATION_UNAVAILABLE" };
+}
+
+function plainGuidanceRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error("invalid guidance");
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((descriptor) => !Object.hasOwn(descriptor, "value"))) throw new Error("invalid guidance");
+  return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
+}
+
+function exactGuidanceKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function snapshotActorContext(value: ActorContext): ActorContext {

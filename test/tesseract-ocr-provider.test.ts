@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -18,6 +18,7 @@ import {
   TesseractOcrProvider,
   TesseractProcessFailure,
   createNodeTesseractProcessRunner,
+  inspectOptionalTesseractLanguageAssetsSync,
   parseTesseractTsv,
   validateTesseractCheckedInManifestSync,
 } from "../src/runtime/tesseract-ocr-provider.ts";
@@ -105,6 +106,29 @@ test("checked-in Tesseract manifest is exact, hashed and fail-closed on mutation
     (error) => error instanceof DomainError && ["OCR_MODEL_UNAVAILABLE", "OCR_MODEL_INTEGRITY_FAILED"].includes(error.code));
 });
 
+test("optional Chinese and Japanese language assets require exact safe regular files", async (t) => {
+  const root = await mkdtemp(join(homedir(), "clinic-os-language-assets-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tessdata = join(root, "tessdata");
+  await mkdir(tessdata, { recursive: true });
+  await chmod(root, 0o700);
+  await chmod(tessdata, 0o700);
+  await writeFile(join(tessdata, "chi_sim.traineddata"), "synthetic-language-asset", { mode: 0o600 });
+  assert.deepEqual(inspectOptionalTesseractLanguageAssetsSync(tessdata), { chiSim: true, jpn: false });
+
+  await writeFile(join(tessdata, "jpn.traineddata"), "synthetic-language-asset", { mode: 0o600 });
+  assert.deepEqual(inspectOptionalTesseractLanguageAssetsSync(tessdata), { chiSim: true, jpn: true });
+
+  await rm(join(tessdata, "chi_sim.traineddata"));
+  await symlink(join(tessdata, "jpn.traineddata"), join(tessdata, "chi_sim.traineddata"));
+  assert.deepEqual(inspectOptionalTesseractLanguageAssetsSync(tessdata), { chiSim: false, jpn: true });
+
+  await rm(join(tessdata, "chi_sim.traineddata"));
+  await writeFile(join(tessdata, "chi_sim.traineddata"), "synthetic-language-asset", { mode: 0o600 });
+  await chmod(join(tessdata, "jpn.traineddata"), 0o666);
+  assert.deepEqual(inspectOptionalTesseractLanguageAssetsSync(tessdata), { chiSim: true, jpn: false });
+});
+
 test("TSV parser recognizes bounded markers and derives confidence", () => {
   assert.deepEqual(parseTesseractTsv(new TextEncoder().encode(
     TSV_HEADER + row("EYE", "96.5") + row("EXAM", "95") + row("REPORT", "93.5"),
@@ -118,6 +142,8 @@ test("TSV parser recognizes bounded markers and derives confidence", () => {
     fields: { ocrText: "UNMARKED", reportType: null },
     missingFields: ["reportType"], confidence: 0.95,
   });
+  assert.equal((parseTesseractTsv(new TextEncoder().encode(TSV_HEADER + row("眼科检查报告"))) as { fields: { reportType: string } }).fields.reportType, "EYE_EXAM");
+  assert.equal((parseTesseractTsv(new TextEncoder().encode(TSV_HEADER + row("眼底検査報告"))) as { fields: { reportType: string } }).fields.reportType, "FUNDUS");
 });
 
 test("TSV parser rejects malformed output and non-decimal confidence", () => {

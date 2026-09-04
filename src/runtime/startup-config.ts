@@ -5,7 +5,9 @@ import { DomainError } from "../domain/errors.ts";
 import {
   TESSERACT_MODEL_MANIFEST_SHA256,
   TESSERACT_MODEL_MANIFEST_FILE,
+  type TesseractLanguage,
   TESSERACT_OCR_MODEL_ID,
+  inspectOptionalTesseractLanguageAssetsSync,
   validateTesseractAssetPathChainSync,
   validateTesseractCheckedInManifestSync,
 } from "./tesseract-ocr-provider.ts";
@@ -19,6 +21,7 @@ import { OllamaLocalRecommendationProvider, validateOllamaLoopbackEndpoint } fro
 import { LocalManagerRecommendationService } from "../application/local-manager-recommendation.ts";
 import { LocalObjectStore } from "../storage/local-object-store.ts";
 import { ObjectStoreGateway } from "../storage/object-store-gateway.ts";
+import { inspectExternalModelVolumeRootSync } from "./external-model-volume.ts";
 
 export const CLINICAL_CAPABILITY = "EXTRACT_EYE_EXAM_REPORT" as const;
 const MANIFEST_FILE = fileURLToPath(new URL(`../../models/${TESSERACT_MODEL_MANIFEST_FILE}`, import.meta.url));
@@ -64,6 +67,8 @@ interface PrivateStartupValues {
   privateInferenceManifestSha256?: string;
   localRecommendationEndpoint?: string;
   localRecommendationModelId?: string;
+  externalModelVolumeRoot?: string;
+  ocrLanguage?: TesseractLanguage;
 }
 
 const privateValues = new WeakMap<object, PrivateStartupValues>();
@@ -75,6 +80,10 @@ const ENV_NAMES = new Set([
   "WO021_TESSDATA_DIR", "CLINIC_OS_PRIVATE_INFERENCE_ENDPOINT", "CLINIC_OS_PRIVATE_INFERENCE_MODEL_ID",
   "CLINIC_OS_PRIVATE_INFERENCE_MANIFEST_SHA256", "CLINIC_OS_INFERENCE_CAPABILITIES", "PORT",
   "CLINIC_OS_LOCAL_RECOMMENDATION_ENDPOINT", "CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID",
+  "CLINIC_OS_EXTERNAL_MODEL_VOLUME_ROOT",
+  "CLINIC_OS_DEMO_WORKSPACE_BOOTSTRAP",
+  "CLINIC_OS_OCR_LANGUAGE",
+  "CLINIC_OS_PREVIEW_WORKSPACE", "CLINIC_OS_LAN_DEMO", "CLINIC_OS_LAN_ADDRESS", "PREVIEW_HOST",
   "PREVIEW_MODE", "PREVIEW_OBJECT_STORE_ROOT", "LOCAL_OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT",
 ]);
 const LEGACY_NAMES = new Set(["PREVIEW_OBJECT_STORE_ROOT", "LOCAL_OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT", "PREVIEW_PORT"]);
@@ -92,6 +101,10 @@ export interface ConfiguredLocalRuntime {
     ocrManifest: () => Promise<boolean>;
     inferenceCapability: () => Promise<boolean>;
   }>;
+  /** Bounded optional-asset observation for the local preview only. */
+  readonly optionalOcrLanguageAssets: () => Readonly<{ chiSim: boolean; jpn: boolean }>;
+  /** Read-only external-volume observation for the local preview only. */
+  readonly externalModelVolume: () => boolean;
 }
 
 export function validateStartupConfig(input: Record<string, unknown> = process.env): StartupConfig {
@@ -147,6 +160,7 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
   const capabilities = parseCapabilities(env.CLINIC_OS_INFERENCE_CAPABILITIES, manifest.inferenceProvider);
   let tesseractPath: string | undefined;
   let tessdataDir: string | undefined;
+  let ocrLanguage: TesseractLanguage | undefined;
   const needsLocalOcr = manifest.inferenceProvider === "LOCAL_MODEL";
   if (needsLocalOcr) {
     tesseractPath = requiredAbsolutePath(env.WO021_TESSERACT_PATH, "TESSERACT_PATH_REQUIRED");
@@ -154,7 +168,15 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
     // These validators intentionally retain their stable, non-secret DomainError codes.
     validateTesseractCheckedInManifestSync(MANIFEST_FILE);
     validateTesseractAssetPathChainSync({ executablePath: tesseractPath, tessdataDir });
+    ocrLanguage = localOcrLanguage(env.CLINIC_OS_OCR_LANGUAGE);
+    const optional = inspectOptionalTesseractLanguageAssetsSync(tessdataDir);
+    if ((ocrLanguage === "chi_sim+eng" && !optional.chiSim) || (ocrLanguage === "jpn+eng" && !optional.jpn)) {
+      throw startupError("OCR_LANGUAGE_ASSET_REQUIRED");
+    }
   } else if (env.WO021_TESSERACT_PATH !== undefined || env.WO021_TESSDATA_DIR !== undefined) {
+    throw startupError("OCR_CONFIGURATION_FORBIDDEN");
+  }
+  if (!needsLocalOcr && env.CLINIC_OS_OCR_LANGUAGE !== undefined) {
     throw startupError("OCR_CONFIGURATION_FORBIDDEN");
   }
 
@@ -186,6 +208,12 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
   const localRecommendationModelId = recommendationValuesPresent
     ? boundedToken(env.CLINIC_OS_LOCAL_RECOMMENDATION_MODEL_ID, "LOCAL_RECOMMENDATION_MODEL_REQUIRED")
     : undefined;
+  if (env.CLINIC_OS_EXTERNAL_MODEL_VOLUME_ROOT !== undefined && manifest.inferenceProvider !== "LOCAL_MODEL") {
+    throw startupError("EXTERNAL_MODEL_VOLUME_CONFIGURATION_FORBIDDEN");
+  }
+  const externalModelVolumeRoot = env.CLINIC_OS_EXTERNAL_MODEL_VOLUME_ROOT === undefined
+    ? undefined
+    : requiredMountedVolumeRoot(env.CLINIC_OS_EXTERNAL_MODEL_VOLUME_ROOT);
 
   const port = parsePort(env.PORT);
   const snapshot = makeSnapshot(manifest, capabilities, {
@@ -205,6 +233,8 @@ export function validateStartupConfig(input: Record<string, unknown> = process.e
     privateInferenceManifestSha256: modelManifestSha256,
     localRecommendationEndpoint,
     localRecommendationModelId,
+    externalModelVolumeRoot,
+    ocrLanguage,
   }));
   return config;
 }
@@ -226,6 +256,7 @@ export function createConfiguredLocalRuntime(config: StartupConfig): ConfiguredL
   const inference = new InferenceGateway(manifest, new TesseractOcrProvider({
     executablePath: values.tesseractPath,
     tessdataDir: values.tessdataDir,
+    language: values.ocrLanguage,
   }));
   const localRecommendations = values.localRecommendationEndpoint && values.localRecommendationModelId
     ? new LocalManagerRecommendationService(new InferenceGateway(manifest, new OllamaLocalRecommendationProvider({
@@ -255,6 +286,8 @@ export function createConfiguredLocalRuntime(config: StartupConfig): ConfiguredL
       },
       inferenceCapability: async () => true,
     }),
+    optionalOcrLanguageAssets: () => inspectOptionalTesseractLanguageAssetsSync(values.tessdataDir!),
+    externalModelVolume: () => inspectExternalModelVolumeRootSync(values.externalModelVolumeRoot),
   });
 }
 
@@ -375,6 +408,14 @@ function requiredAbsolutePath(value: string | undefined, code: string): string {
   return result;
 }
 
+function requiredMountedVolumeRoot(value: string | undefined): string {
+  const result = required(value, "EXTERNAL_MODEL_VOLUME_ROOT_REQUIRED");
+  if (!/^\/Volumes\/[^/\0]+$/.test(result) || new URL(`file://${result}`).pathname !== result) {
+    throw startupError("EXTERNAL_MODEL_VOLUME_ROOT_INVALID");
+  }
+  return result;
+}
+
 function isLocalFileProvider(value: RuntimeManifest["fileProvider"]): boolean {
   return value === "LOCAL_OBJECT_STORE";
 }
@@ -411,6 +452,12 @@ function parsePort(value: string | undefined): number {
   const port = Number(value);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw startupError("PORT_INVALID");
   return port;
+}
+
+function localOcrLanguage(value: string | undefined): TesseractLanguage {
+  if (value === undefined) return "eng";
+  if (value === "chi_sim+eng" || value === "jpn+eng" || value === "eng") return value;
+  throw startupError("OCR_LANGUAGE_INVALID");
 }
 
 function startupError(code: string): DomainError {

@@ -5,6 +5,7 @@ import { DomainError } from "../domain/errors.ts";
 import type { DatabasePool } from "./database-contracts.ts";
 import { parseStrictIsoInstant } from "./strict-timestamp.ts";
 import { withTenantTransaction } from "./tenant-transaction.ts";
+import type { ExpectationWorkspace } from "./expectation-repository.ts";
 
 export type EmployeeOpenExpectationItem = {
   expectationId: string;
@@ -40,8 +41,9 @@ export class EmployeeOpenExpectationReadRepository {
   async listOpenExamReportExpectations(
     context: ActorContext,
     rawQuery: EmployeeOpenExpectationQuery,
+    workspace?: ExpectationWorkspace,
   ): Promise<EmployeeOpenExpectationPage> {
-    return this.listOpenFlowExpectations(context, rawQuery, "EXAM_REPORT");
+    return this.listOpenFlowExpectations(context, rawQuery, "EXAM_REPORT", undefined, workspace);
   }
 
   async listOpenFlowExpectations(
@@ -49,13 +51,17 @@ export class EmployeeOpenExpectationReadRepository {
     rawQuery: EmployeeOpenExpectationQuery,
     consequenceKind: EyeExamFlowKind,
     identityAnchor?: string,
+    workspace?: ExpectationWorkspace,
   ): Promise<EmployeeOpenExpectationPage> {
-    const captured = structuredClone({ context, query: rawQuery, consequenceKind, identityAnchor });
+    const captured = structuredClone({ context, query: rawQuery, consequenceKind, identityAnchor, workspace });
     assertActorAccess(captured.context, captured.context.clinicId, "EMPLOYEE");
     if (!isEyeExamFlowKind(captured.consequenceKind)) {
       throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
     }
     if (captured.identityAnchor !== undefined && !isOpaqueId(captured.identityAnchor)) {
+      throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
+    }
+    if (captured.workspace !== undefined && !["DOCTOR", "EXAM", "CASHIER"].includes(captured.workspace)) {
       throw new DomainError("INVALID_EXPECTATION_QUERY", "Expectation query is invalid.");
     }
     const query = validateQuery(captured.query);
@@ -77,12 +83,15 @@ export class EmployeeOpenExpectationReadRepository {
           JOIN artifact trigger_artifact
             ON trigger_artifact.clinic_id = trigger_link.clinic_id
            AND trigger_artifact.id = trigger_link.artifact_id
+          LEFT JOIN expectation_workspace_assignment assignment
+            ON assignment.clinic_id = e.clinic_id AND assignment.expectation_id = e.id
          WHERE e.clinic_id = $1
            AND w.clinic_id = $1
            AND initial.clinic_id = $1
            AND trigger_link.clinic_id = $1
            AND trigger_artifact.clinic_id = $1
-           AND trigger_artifact.source_employee_id = $2
+           AND ($9::text IS NULL OR assignment.workspace = $9)
+           AND ($9::text IS NOT NULL OR trigger_artifact.source_employee_id = $2)
            AND e.state = 'OPEN'
            AND w.status = 'OPEN'
            AND e.consequence_kind = $7
@@ -95,7 +104,7 @@ export class EmployeeOpenExpectationReadRepository {
          LIMIT $6`, [
         captured.context.clinicId, captured.context.actorId, query.asOf,
         query.cursor?.dueAt ?? null, query.cursor?.expectationId ?? "", query.limit + 1,
-        captured.consequenceKind, captured.identityAnchor ?? null,
+        captured.consequenceKind, captured.identityAnchor ?? null, captured.workspace ?? null,
       ]);
       return result.rows;
     });

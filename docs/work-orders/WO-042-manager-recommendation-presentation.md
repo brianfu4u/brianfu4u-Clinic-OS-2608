@@ -1,6 +1,6 @@
 # WO-042 — Manager Recommendation Presentation
 
-**Status:** Architecture frozen / Builder active
+**Status:** Accepted locally — 2026-09-01
 **Depends on:** WO-038; WO-039; WO-041
 
 ## Goal
@@ -27,3 +27,10 @@ remain separate and authoritative.
 Test manager and tenant scope before model work, safe projection/redaction,
 unavailable behavior, no decision path and dashboard display. Run focused/full
 tests locally; commit and push only after independent acceptance.
+
+## Acceptance record
+
+- Manager guidance/presentation focused tests passed 7/7.
+- Independent full regression passed 389/389.
+- The optional guide is read-only and unavailable-safe; it cannot create a
+  manager decision or affect closure.

@@ -1,0 +1,20 @@
+{
+  "manifestVersion": "clinic-os-local-ocr-evaluation-fixtures-v1",
+  "maximumCharacterErrorRate": 0.02,
+  "fixtures": [
+    {
+      "file": "tesseract-eye-exam.png",
+      "mediaType": "image/png",
+      "sha256": "b8489ed0ff777358f81abcc853eb6e8b5025d2547995008d4d9a4cfa3a204671",
+      "expectedText": "EYE EXAM REPORT VISUAL ACUITY 20 20",
+      "reportType": "EYE_EXAM"
+    },
+    {
+      "file": "tesseract-fundus-exam.png",
+      "mediaType": "image/png",
+      "sha256": "d5758c29984fd2676ed9b2ab5dbf8dbbe050bd6e464fe70eb2747b08094d884e",
+      "expectedText": "FUNDUS EXAM REPORT RIGHT EYE NORMAL",
+      "reportType": "FUNDUS"
+    }
+  ]
+}
