@@ -14,7 +14,7 @@ const strings = {
     evidenceUnavailable: "永続化された証拠アップロードはこの合成プレビューでは利用できません。",
     missingExpectation: "処理する未完了の検査レポートを選択してください。",
     expectationSelect: "未完了の検査レポート", expectationLoading: "未完了の検査レポートを読み込み中…", expectationEmpty: "選択できる未完了の検査レポートはありません。",
-    chooseEvidence: "PNG または JPEG 画像を選択してください。PDF は現在認識できません。",
+    chooseEvidence: "PNG または JPEG 画像を選択してください。PDF は現在認識できません。", uploadEvidence: "画像を追加", evidenceSelected: "画像を選択しました",
     registrationRecorded: "受付登録を記録しました。次に処方を記録してください。", prescriptionRecorded: "処方を記録しました。次に未完了の検査レポートを選択してください。", paymentRecorded: "会計完了を記録しました。店長が標準クローズできます。",
     evidenceCompleted: "証拠を処理しました", extractionReview: "証拠の抽出に確認が必要です。", compositionReview: "ワークフロー照合に確認が必要です。", ocrResult: "ローカル OCR 構造化結果", reportType: "帳票種別", missingFields: "不足項目", confidence: "認識信頼度", noMissingFields: "なし", ocrReviewQueue: "OCR 確認待ち",
     employeeIntro: "この担当に割り当てられた業務だけを記録します。", receptionWorkspace: "受付：登録", doctorWorkspace: "医師：処方", examWorkspace: "検査：レポート", cashierWorkspace: "会計：支払い完了", registrationStep: "1. 受付登録", prescriptionStep: "2. 処方", reportStep: "3. 検査レポート", paymentStep: "4. 会計完了", managerIntro: "未完了の患者フローと、店長確認が必要な項目を確認します。", total: "全フロー", verified: "検証済み", attention: "要確認", commandCenter: "運用コマンドセンター", closureQueue: "閉鎖キュー", walkthrough: "デモ確認",
@@ -35,7 +35,7 @@ const strings = {
     evidenceUnavailable: "合成预览不提供持久化证据上传。",
     missingExpectation: "请选择要处理的未完成检查报告。",
     expectationSelect: "待处理检查报告", expectationLoading: "正在读取待处理检查报告…", expectationEmpty: "没有可选择的待处理检查报告。",
-    chooseEvidence: "请选择PNG或JPEG图片。PDF目前不能识别。",
+    chooseEvidence: "请选择PNG或JPEG图片。PDF目前不能识别。", uploadEvidence: "上传检查图片", evidenceSelected: "已选择图片",
     registrationRecorded: "登记已记录。请接着记录处方。", prescriptionRecorded: "处方已记录。请接着选择待处理检查报告。", paymentRecorded: "收费完成已记录。店长现在可以标准关闭。",
     evidenceCompleted: "证据已处理", extractionReview: "证据抽取需要复核。", compositionReview: "工作流匹配需要复核。", ocrResult: "本机 OCR 结构化结果", reportType: "报告类型", missingFields: "缺失字段", confidence: "识别置信度", noMissingFields: "无", ocrReviewQueue: "OCR 待复核",
     employeeIntro: "只记录分配给当前岗位的业务。", receptionWorkspace: "前台：登记", doctorWorkspace: "医生：处方", examWorkspace: "检查：报告", cashierWorkspace: "收费：付款完成", registrationStep: "第一步：前台登记", prescriptionStep: "第二步：医生处方", reportStep: "第三步：上传检查报告", paymentStep: "第四步：收费完成", managerIntro: "查看未闭环的患者流程，以及需要店长确认的项目。", total: "全部流程", verified: "已验证", attention: "需关注", commandCenter: "运营指挥中心", closureQueue: "闭环队列", walkthrough: "演示观察",
@@ -56,7 +56,7 @@ const strings = {
     evidenceUnavailable: "Durable evidence upload is unavailable in the synthetic preview.",
     missingExpectation: "Select an open exam report expectation first.",
     expectationSelect: "Open exam report", expectationLoading: "Loading open exam reports…", expectationEmpty: "No selectable open exam reports.",
-    chooseEvidence: "Choose a PNG or JPEG image. PDF is not currently supported.",
+    chooseEvidence: "Choose a PNG or JPEG image. PDF is not currently supported.", uploadEvidence: "Add exam image", evidenceSelected: "Image selected",
     registrationRecorded: "Registration recorded. Record the prescription next.", prescriptionRecorded: "Prescription recorded. Select an open exam report next.", paymentRecorded: "Payment completion recorded. The manager can now close the flow.",
     evidenceCompleted: "Evidence processed", extractionReview: "Evidence extraction needs review.", compositionReview: "Workflow matching needs review.", ocrResult: "Local OCR structured result", reportType: "Report type", missingFields: "Missing fields", confidence: "Recognition confidence", noMissingFields: "None", ocrReviewQueue: "OCR review queue",
     employeeIntro: "Record only the work assigned to this workspace.", receptionWorkspace: "Reception: registration", doctorWorkspace: "Doctor: prescription", examWorkspace: "Exam: report", cashierWorkspace: "Cashier: payment completion", registrationStep: "1. Reception registration", prescriptionStep: "2. Prescription", reportStep: "3. Upload exam report", paymentStep: "4. Payment completion", managerIntro: "Review incomplete patient flows and items requiring a manager decision.", total: "All flows", verified: "Verified", attention: "Needs attention", commandCenter: "Operations command center", closureQueue: "Closure queue", walkthrough: "Demo walkthrough",
@@ -267,7 +267,9 @@ function composer() {
         <label for="expectation-select">${t("expectationSelect")}</label>
         <select id="expectation-select" name="expectationId" required disabled><option value="">${t("expectationLoading")}</option></select>
         <label for="evidence-file">${t("evidenceFile")}</label>
-        <input id="evidence-file" name="evidenceFile" type="file" accept="image/png,image/jpeg" disabled>
+        <label class="evidence-upload" data-evidence-upload for="evidence-file" aria-disabled="true"><span aria-hidden="true">＋</span>${t("uploadEvidence")}</label>
+        <input class="sr-only" id="evidence-file" name="evidenceFile" type="file" accept="image/png,image/jpeg" disabled>
+        <p class="muted" data-evidence-selected></p>
         <p class="muted" data-evidence-help></p>
       </div>
     </div>
@@ -280,6 +282,10 @@ function bindComposer() {
   const form = document.querySelector("#composer");
   if (!form) return;
   form.elements.identityAnchor.addEventListener("change", () => { stageStatus = null; updateEvidenceControl(form); });
+  form.elements.evidenceFile?.addEventListener("change", (event) => {
+    const selected = form.querySelector("[data-evidence-selected]");
+    if (selected) selected.textContent = event.currentTarget.files?.length ? t("evidenceSelected") : "";
+  });
   form.addEventListener("input", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("change", () => { delete form.dataset.idempotencyKey; });
   form.addEventListener("submit", async (event) => {
@@ -323,10 +329,12 @@ function bindComposer() {
 function updateEvidenceControl(form) {
   const control = form.querySelector("[data-evidence-control]");
   const file = form.elements.evidenceFile;
+  const upload = form.querySelector("[data-evidence-upload]");
   const help = form.querySelector("[data-evidence-help]");
   const report = form.elements.kind.value === "EXAM_REPORT";
   control.hidden = !report;
   file.disabled = !report || !postgresClinical;
+  upload?.setAttribute("aria-disabled", String(file.disabled));
   const select = form.elements.expectationId;
   select.disabled = !report || !postgresClinical;
   help.textContent = report
