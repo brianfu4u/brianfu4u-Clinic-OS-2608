@@ -17,6 +17,7 @@ test("employee preview keeps chat and capture separate in an accessible sidebar 
   assert.match(source, /<input type="hidden" name="kind" value="\$\{composerKind\}">/);
   assert.match(source, /class="evidence-upload" data-evidence-upload/);
   assert.match(source, /uploadEvidence/);
+  assert.match(source, /health\.profile === "ON_PREM_STRICT"/);
   assert.doesNotMatch(source, /localStorage\.(?:setItem|getItem)\([^)]*(?:workspace|role|topic|message|expectation|identity)/i);
   assert.doesNotMatch(source, /console\./);
   assert.match(css, /\.employee-shell/);

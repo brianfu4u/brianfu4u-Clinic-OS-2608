@@ -703,7 +703,7 @@ function validateLocalReadiness(value) {
 }
 
 api("/api/health").then((health) => {
-  postgresClinical = health.mode === "hybrid-postgres-preview";
+  postgresClinical = health.mode === "hybrid-postgres-preview" || health.profile === "ON_PREM_STRICT";
   return location.pathname === "/" ? renderReadiness() : location.pathname === "/manager" ? loadManager() : loadEmployee();
 }).catch(showFatal);
 
